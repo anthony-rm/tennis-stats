@@ -6,13 +6,14 @@ Run:
 
 Endpoints
     GET  /                     dashboard (web/index.html)
+    GET  /api/version          dashboard version (VERSION file)
     GET  /api/columns          checkbox catalogue (groups A-L)
     GET  /api/matches?form_n=N match rows + computed values per column
     GET  /api/jobs             job states (polling fallback)
-    GET  /api/scan/stream      SSE: job progress events
+    GET  /api/scan/stream      SSE: job progress + live data events
     POST /api/scan             start the Winamax list scan
-    POST /api/odds             start the odds pass (all pending or given ids)
-    POST /api/stats            start the Tennis Abstract fetch (all or given names)
+    POST /api/odds             start the odds pass (all pending / force / given ids)
+    POST /api/stats            start the Tennis Abstract fetch (all missing / given names)
     GET  /api/selections       saved selection (cells + format)
     POST /api/selections       save selection
     POST /api/export           selection -> text (llm | tsv | md | md_block | json)
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -31,7 +33,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app import columns as columns_mod
 from app.exporter import FORMATS, export_text
 from app.jobs import JobBusy, JobManager
-from app.paths import asset_dir, cache_dir
+from app.paths import app_version, asset_dir, cache_dir
 from app.store import Store
 
 WEB_INDEX = asset_dir() / "web" / "index.html"
@@ -44,11 +46,14 @@ jobs = JobManager(store, CACHE_DIR)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # auto-scan on startup (PLAN.md §4/§10: list EVERY match on the page —
-    # the UI selects today's by default via its Day filter)
-    try:
-        jobs.start_scan(stop_at_night_gap=False, include_live=True)
-    except JobBusy:
-        pass
+    # the UI selects today's by default via its Day filter).
+    # TENNIS_STATS_NO_AUTOSCAN=1 skips it: useful when a second instance runs
+    # next to the installed app (two concurrent Winamax scrapes = WAF risk).
+    if not os.environ.get("TENNIS_STATS_NO_AUTOSCAN"):
+        try:
+            jobs.start_scan(stop_at_night_gap=False, include_live=True)
+        except JobBusy:
+            pass
     yield
     await jobs.shutdown()
     store.close()
@@ -67,6 +72,11 @@ async def index() -> FileResponse:
 
 
 # ------------------------------------------------------------------ data ---
+@app.get("/api/version")
+async def get_version() -> dict:
+    return {"version": app_version()}
+
+
 @app.get("/api/columns")
 async def get_columns() -> dict:
     return {"groups": columns_mod.catalogue()}
@@ -148,7 +158,10 @@ async def post_odds(body: Optional[dict] = Body(default=None)) -> dict:
     if isinstance(ids, str):
         ids = [ids]
     try:
-        job = jobs.start_odds([str(i) for i in ids] if ids else None)
+        job = jobs.start_odds(
+            [str(i) for i in ids] if ids else None,
+            force=bool(body.get("force")),
+        )
     except JobBusy as exc:
         raise HTTPException(409, str(exc))
     return {"job": job}

@@ -220,7 +220,15 @@ def fetch_latest(current: str) -> dict:
 
 
 def latest_release(current: str) -> dict | None:
-    """Newer release info (version, zip url, page) or None."""
+    """Newer release info (version, zip url, page) or None.
+
+    ``TENNIS_STATS_NO_UPDATE=1`` turns the update check off entirely — used
+    when testing a local build next to the installed app so the temporary
+    build never overwrites itself.
+    """
+    if os.environ.get("TENNIS_STATS_NO_UPDATE"):
+        log.info("update check disabled (TENNIS_STATS_NO_UPDATE)")
+        return None
     try:
         data = fetch_latest(current)
     except Exception:

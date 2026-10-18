@@ -43,6 +43,12 @@
   }
   .title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .ver {
+    font-size: 11px; font-weight: 600; letter-spacing: .3px;
+    color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 1px 9px; font-variant-numeric: tabular-nums;
+  }
   .jobs { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
   .chip {
     display: inline-flex; align-items: center; gap: 6px;
@@ -144,12 +150,22 @@
   tbody td.wrap .line { align-items: flex-start; }
   tbody td.wrap .val { white-space: pre-wrap; overflow: visible; text-overflow: clip; }
   tbody td.wrap .odd-copy { margin-top: 2px; }
-  /* day separator rows */
+  /* day separator rows — overflow must stay visible: an overflow:hidden
+     ancestor would become the sticky element's scrollport and pin it to the
+     (never-scrolling) cell instead of the grid */
   tbody tr.day-row td {
     background: var(--bg); border-bottom: 1px solid var(--border);
     border-top: 1px solid var(--border); padding: 6px 10px;
+    overflow: visible;
   }
-  tbody tr.day-row .day-cell { display: flex; align-items: center; gap: 10px; }
+  /* the "Today / Tomorrow" label stays pinned to the left edge while the
+     grid scrolls sideways (sticky inside the full-width day row) */
+  tbody tr.day-row .day-cell {
+    display: inline-flex; align-items: center; gap: 10px;
+    position: sticky; left: 0; z-index: 5;
+    background: var(--bg); padding-right: 18px;
+    box-shadow: 1px 0 0 var(--border);
+  }
   tbody tr.day-row .day-label {
     font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
     color: var(--fg);
@@ -178,6 +194,13 @@
     font-size: 11px; border-radius: 5px; flex: none; margin-top: 1px; opacity: .5;
   }
   .odd-copy:hover:not(:disabled) { opacity: 1; }
+  /* ladder columns (Total games, Games spread): the list stays folded behind
+     a one-line summary until the cell is selected — pure CSS on the
+     .selected class, so a checkbox toggle in refreshCells() develops /
+     folds it without a re-render of the grid */
+  td.fold-col:not(.selected) .lines > .line { display: none; }
+  td.fold-col.selected .fold-summary { display: none; }
+  .fold-summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
   td.selected { background: var(--sel) !important; box-shadow: inset 0 0 0 1px var(--sel-border); }
   tbody tr:hover td.selected { background: var(--sel) !important; }
 
@@ -221,6 +244,7 @@
 <header>
   <div class="title-row">
     <h1>Tennis Betting Dashboard</h1>
+    <span class="ver" id="version" title="Dashboard version">v?</span>
     <div class="jobs" id="jobs" aria-live="polite">
       <span class="chip" id="job-scan"><span class="dot"></span><strong>scan</strong> <span>connecting…</span></span>
       <span class="chip" id="job-odds"><span class="dot"></span><strong>odds</strong> <span>idle</span></span>
@@ -229,13 +253,9 @@
   </div>
   <div class="toolbar">
     <button class="primary" id="btn-scan" title="Re-scan the whole Winamax tennis list (all days)">↻ Refresh list</button>
-    <button id="btn-odds" title="Extract every market for the selected matches (tick a line or a day)">Fetch odds</button>
-    <button id="btn-stats" title="Fetch Tennis Abstract stats for every player in the list">Fetch stats</button>
-    <label class="inline" title="Window used by the form columns (last N tour matches)">Form last
-      <select id="form-n" aria-label="Form window (last N matches)">
-        <option>5</option><option selected>10</option><option>15</option><option>20</option>
-      </select>
-    </label>
+    <button id="btn-odds" title="Extract every market for every match that still has no odds — the whole list, not only the selected lines (live matches skipped)">Fetch odds</button>
+    <button id="btn-odds-refresh" title="Re-fetch the odds of every match, even the ones already shown — the odds move during the day, so this always pulls the current values (live matches skipped)">↻ Refresh odds</button>
+    <button id="btn-stats" title="Fetch Tennis Abstract stats for every player still missing them — the whole list, not only the selected lines">Fetch stats</button>
     <span class="spacer"></span>
     <input type="search" id="search" placeholder="Search player / tournament…" aria-label="Search matches">
     <label class="inline"><input type="checkbox" id="hide-live"> hide live</label>
@@ -296,7 +316,7 @@ const state = {
   selectionTouched: false,     // the user changed the cells in this browser
   linesTouched: false,         // the user changed the lines in this browser
   defaultApplied: false,
-  format: "llm", formN: 10,
+  format: "llm",
   search: "", hideLive: false,
   collapsed: new Set(),
   jobs: {}, loadedOnce: false,
@@ -314,6 +334,10 @@ const $ = (id) => document.getElementById(id);
 
 /* Winamax odd columns: every line of these cells gets a 🎾 copy button. */
 const ODDS_COLS = new Set(["a.odds", "a.games", "a.spread"]);
+
+/* ladder columns: their multi-line list folds behind a summary and only
+   develops while the cell is selected */
+const FOLD_COLS = new Set(["a.games", "a.spread"]);
 
 const surname = (name) => String(name || "").trim().split(/\s+/).pop() || "";
 
@@ -625,6 +649,7 @@ function renderHead() {
     for (const c of cols) {
       const th = document.createElement("th");
       th.scope = "col";
+      th.dataset.col = c.id;
       if (first) th.classList.add("group-start");
       first = false;
       const lab = document.createElement("label");
@@ -674,6 +699,7 @@ function buildSpecs() {
 function cellTd(r, c, text, active, playerName) {
   const td = document.createElement("td");
   td.dataset.col = c.id;
+  if (FOLD_COLS.has(c.id)) td.classList.add("fold-col");
   const val = text == null || text === "" ? "—" : text;
   if (String(val).includes("\n")) td.classList.add("wrap");
   const on = active && isSelected(r.match_id, c.id);
@@ -700,6 +726,16 @@ function cellTd(r, c, text, active, playerName) {
 
   const linesEl = document.createElement("div");
   linesEl.className = "lines" + (active ? "" : " disabled");
+  /* ladder columns fold by default: a summary stands in for the list and
+     the odds develop only while this cell is selected (CSS toggles it) */
+  if (FOLD_COLS.has(c.id) && multiline) {
+    const n = String(val).split("\n").filter((s) => s.trim()).length;
+    const sum = document.createElement("div");
+    sum.className = "fold-summary";
+    sum.textContent = `▸ ${n} ${n === 1 ? "odd" : "odds"}`;
+    sum.title = `${n} ${n === 1 ? "odd" : "odds"} — tick the box (or click) to develop:\n${val}`;
+    linesEl.appendChild(sum);
+  }
   for (const ln of String(val).split("\n")) {
     const line = document.createElement("div");
     line.className = "line";
@@ -867,7 +903,47 @@ function renderBody() {
     tr.appendChild(td);
     body.appendChild(tr);
   }
+  fitSpreadColumn();
   refreshHeadStates();
+}
+
+/* The "Games spread" column sizes itself to its content: the widest odd line
+   wins (checkbox + copy button + padding included) instead of the fixed
+   wrap width, so no cell wraps or clips. */
+function fitSpreadColumn() {
+  const cells = document.querySelectorAll('#body td[data-col="a.spread"]');
+  const th = document.querySelector('#head-cols th[data-col="a.spread"]');
+  if (!cells.length || !th) return;
+
+  let probe = document.getElementById("measure-probe");
+  if (!probe) {
+    probe = document.createElement("span");
+    probe.id = "measure-probe";
+    probe.style.cssText = "position:absolute;left:-9999px;top:0;" +
+                          "visibility:hidden;white-space:pre;";
+    document.body.appendChild(probe);
+  }
+  const sample = cells[0].querySelector(".val");
+  if (sample) {
+    const cs = getComputedStyle(sample);
+    probe.style.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  }
+
+  let widest = 0;
+  for (const td of cells) {
+    // a folded cell only shows its summary: measure what is actually on screen
+    const nodes = td.querySelectorAll(td.classList.contains("selected")
+      ? ".line .val" : ".fold-summary");
+    for (const val of nodes) {
+      probe.textContent = val.textContent;
+      const w = probe.getBoundingClientRect().width;
+      if (w > widest) widest = w;
+    }
+  }
+  // td padding (20) + checkbox (15) + gaps (7 + 6) + copy button (24) + slack
+  const width = Math.min(520, Math.max(190, Math.ceil(widest) + 74)) + "px";
+  for (const td of cells) { td.style.minWidth = width; td.style.maxWidth = width; }
+  th.style.width = th.style.minWidth = th.style.maxWidth = width;
 }
 
 function refreshCells() {
@@ -904,6 +980,7 @@ function refreshCells() {
     if (cnt) cnt.textContent = `${on}/${dayRows.length} selected`;
   }
   refreshHeadStates();
+  fitSpreadColumn();   // selection develops / folds Games spread cells
 }
 
 /* Default preset: an untouched, empty selection starts with "Match info"
@@ -953,8 +1030,13 @@ function render() {
     syncLayout();
     return;
   }
+  // keep the viewport (both axes) across a re-render — the live refreshes
+  // below rebuild the grid while the user may be scrolled somewhere
+  const wrap = $("table-wrap");
+  const sx = wrap.scrollLeft, sy = wrap.scrollTop;
   renderHead();
   renderBody();
+  wrap.scrollLeft = sx; wrap.scrollTop = sy;
   updateCount();
   syncLayout();
 }
@@ -978,12 +1060,16 @@ function renderJobs() {
   const busy = (k) => (state.jobs[k] || {}).status === "running";
   $("btn-scan").disabled = busy("scan");
   $("btn-odds").disabled = busy("odds") || busy("scan");
+  $("btn-odds-refresh").disabled = busy("odds") || busy("scan");
   $("btn-stats").disabled = busy("stats");
 }
 
 /* ---------------------------- data loading ------------------------------ */
+let loadSeq = 0;
 async function loadMatches() {
-  const data = await api(`/api/matches?form_n=${state.formN}`);
+  const seq = ++loadSeq;
+  const data = await api("/api/matches");
+  if (seq !== loadSeq) return;   // a newer refresh already landed: drop this one
   state.rows = data.matches;
   state.raw = data.raw;
   state.rawById = new Map(data.raw.map((m) => [m.match_id, m]));
@@ -1026,6 +1112,27 @@ async function loadJobs() {
   renderJobs();
 }
 
+async function loadVersion() {
+  try {
+    const data = await api("/api/version");
+    $("version").textContent = "v" + data.version;
+  } catch (e) { $("version").textContent = ""; }
+}
+
+/* Live refresh: the backend pushes one "data" event per stored row, so the
+   grid fills in during the extraction instead of at the end. Reload at most
+   every LIVE_REFRESH_MS, always flushing a trailing call. */
+const LIVE_REFRESH_MS = 1500;
+let liveTimer = null, livePending = false;
+function scheduleLiveRefresh() {
+  if (liveTimer) { livePending = true; return; }
+  loadMatches().catch(() => {});
+  liveTimer = setTimeout(() => {
+    liveTimer = null;
+    if (livePending) { livePending = false; scheduleLiveRefresh(); }
+  }, LIVE_REFRESH_MS);
+}
+
 function openStream() {
   const es = new EventSource("/api/scan/stream");
   es.onmessage = (ev) => {
@@ -1034,6 +1141,12 @@ function openStream() {
     if (msg.type === "snapshot") {
       state.jobs = msg.jobs;
       renderJobs();
+      return;
+    }
+    if (msg.type === "data") {
+      // a match / player just landed in the store: refresh the grid live
+      // (throttled — the jobs push one event per stored row)
+      scheduleLiveRefresh();
       return;
     }
     if (msg.type === "job") {
@@ -1075,24 +1188,28 @@ $("btn-scan").addEventListener("click", () =>
   post("/api/scan", {stop_at_night_gap: false, include_live: true}, "Scanning Winamax (all days)…"));
 
 $("btn-odds").addEventListener("click", () => {
-  const pending = activeRows().filter((r) => !r.has_odds && !r.live);
+  const pending = state.rows.filter((r) => !r.has_odds && !r.live);
   if (!pending.length) {
-    toast("No pending match among the selected lines", true);
+    toast("Every match already has odds — “↻ Refresh odds” pulls the current ones", true);
     return;
   }
-  post("/api/odds", {match_ids: pending.map((r) => r.match_id)},
-       `Fetching odds for ${pending.length} match${pending.length === 1 ? "" : "es"}…`);
+  post("/api/odds", {},
+       `Fetching odds for ${pending.length} missing match${pending.length === 1 ? "" : "es"}…`);
+});
+
+/* the odds move during the day: re-fetch them even where they are shown */
+$("btn-odds-refresh").addEventListener("click", () => {
+  const targets = state.rows.filter((r) => !r.live);
+  if (!targets.length) { toast("No match to refresh", true); return; }
+  post("/api/odds", {force: true},
+       `Refreshing odds for ${targets.length} match${targets.length === 1 ? "" : "es"}…`);
 });
 
 $("btn-stats").addEventListener("click", () =>
-  post("/api/stats", {}, "Fetching player stats…"));
+  post("/api/stats", {}, "Fetching missing player stats…"));
 
 $("search").addEventListener("input", (e) => { state.search = e.target.value; renderBody(); updateCount(); });
 $("hide-live").addEventListener("change", (e) => { state.hideLive = e.target.checked; renderBody(); updateCount(); });
-$("form-n").addEventListener("change", (e) => {
-  state.formN = parseInt(e.target.value, 10);
-  loadMatches().catch((e2) => toast(e2.message, true));
-});
 $("format").addEventListener("change", (e) => {
   state.format = e.target.value;
   try { localStorage.setItem("ts.format", state.format); } catch (err) {}
@@ -1129,7 +1246,7 @@ $("btn-copy").addEventListener("click", async () => {
   try {
     const data = await api("/api/export", {
       method: "POST",
-      body: JSON.stringify({cells, format: state.format, form_n: state.formN}),
+      body: JSON.stringify({cells, format: state.format}),
     });
     if (!data.text) { toast("Selection produced no output", true); return; }
     const ok = await copyText(data.text);
@@ -1152,7 +1269,7 @@ $("btn-copy-list").addEventListener("click", async () => {
 /* ---------------------------- boot -------------------------------------- */
 (async function boot() {
   try {
-    await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches()]);
+    await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches(), loadVersion()]);
     state.loadedOnce = true;
     maybeApplyDefaultSelection();
     render();

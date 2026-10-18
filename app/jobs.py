@@ -90,10 +90,11 @@ class JobManager:
         self._tasks["scan"] = task
         return self.snapshot()["scan"]
 
-    def start_odds(self, match_ids: Optional[list[str]] = None) -> dict:
+    def start_odds(self, match_ids: Optional[list[str]] = None,
+                   force: bool = False) -> dict:
         self._assert_idle("odds")
         self._update("odds", status="running", message="queued", started_at=_now())
-        task = asyncio.create_task(self._run_odds(match_ids), name="job-odds")
+        task = asyncio.create_task(self._run_odds(match_ids, force), name="job-odds")
         self._tasks["odds"] = task
         return self.snapshot()["odds"]
 
@@ -128,11 +129,17 @@ class JobManager:
             self._fail(kind, exc)
 
     # ------------------------------------------------------------- odds ---
-    async def _run_odds(self, match_ids: Optional[list[str]]) -> None:
+    async def _run_odds(self, match_ids: Optional[list[str]], force: bool = False) -> None:
         kind = "odds"
         if match_ids:
+            # an explicit list is always taken verbatim
             targets = [str(m) for m in match_ids]
+        elif force:
+            # refresh mode: every match, even the ones whose odds are already shown
+            targets = [str(m["match_id"]) for m in self.store.list_matches()
+                       if not m.get("live")]
         else:
+            # default pass: all missing odds, the whole list (not a selection)
             targets = [str(m["match_id"]) for m in self.store.matches_needing_odds()]
         self._update(kind, status="running", message="starting browser",
                      step=0, total=len(targets), started_at=_now(),
@@ -168,6 +175,8 @@ class JobManager:
                             continue
                         self.store.set_odds(mid, odds)
                         fetched += 1
+                        # push the new row to the dashboard right away
+                        self._emit({"type": "data", "kind": "odds"})
                         self._update(kind, step=i, total=len(targets),
                                      message=f"odds: {label} — {odds.get('oddCount', 0)} odds")
                 finally:
@@ -183,49 +192,53 @@ class JobManager:
     async def _run_stats(self, names: Optional[list[str]]) -> None:
         kind = "stats"
         if not names:
+            # default pass: every player of the list MISSING stats (a stored
+            # payload is kept — a stored error is retried)
             matches = self.store.list_matches()
             names = list(dict.fromkeys(
                 [m["player1"] for m in matches if m.get("player1")] +
                 [m["player2"] for m in matches if m.get("player2")]
             ))
+            present = self.store.get_stats()
+            names = [n for n in names
+                     if n not in present or present[n].get("error")]
         names = [n for n in names if n]
         self._update(kind, status="running", message="fetching player stats",
                      step=0, total=len(names), started_at=_now(),
                      finished_at=None, result=None)
         if not names:
-            self._update(kind, status="done", message="no players",
-                         finished_at=_now(), result={"stored": 0})
+            self._update(kind, status="done", message="player stats already up to date",
+                         finished_at=_now(), result={"stored": 0, "unresolved": []})
             return
 
         loop = asyncio.get_running_loop()
+        tally = {"stored": 0, "unresolved": []}
 
-        def progress(done: int, name: str) -> None:
-            loop.call_soon_threadsafe(
-                lambda: self._update(kind, step=done, total=len(names),
-                                     message=f"stats: {name}")
-            )
+        # each player lands in the store (and on the dashboard) as it arrives
+        def progress(done: int, name: str, payload: dict) -> None:
+            def apply() -> None:
+                self.store.upsert_stats(name, payload)
+                tally["stored"] += 1
+                if payload.get("unresolved"):
+                    tally["unresolved"].append(name)
+                self._update(kind, step=done, total=len(names),
+                             message=f"stats: {name}")
+                self._emit({"type": "data", "kind": "stats"})
+            loop.call_soon_threadsafe(apply)
 
         try:
-            payloads = await asyncio.to_thread(
-                self._fetch_all, names, progress
-            )
-            stored = 0
-            unresolved = []
-            for name, payload in payloads.items():
-                self.store.upsert_stats(name, payload)
-                stored += 1
-                if payload.get("unresolved"):
-                    unresolved.append(name)
+            await asyncio.to_thread(self._fetch_all, names, progress)
+            await asyncio.sleep(0)     # let the last queued apply() run first
+            unresolved = tally["unresolved"]
             self._update(kind, status="done",
-                         message=f"{stored} players stored"
+                         message=f"{tally['stored']} players stored"
                                  + (f" ({len(unresolved)} unresolved)" if unresolved else ""),
                          finished_at=_now(),
-                         result={"stored": stored, "unresolved": unresolved})
+                         result={"stored": tally["stored"], "unresolved": unresolved})
         except Exception as exc:
             self._fail(kind, exc)
 
-    def _fetch_all(self, names: list[str], progress) -> dict[str, dict]:
-        out: dict[str, dict] = {}
+    def _fetch_all(self, names: list[str], progress) -> None:
         session = requests.Session()
         for i, name in enumerate(names):
             try:
@@ -236,11 +249,9 @@ class JobManager:
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
                     "profile": {}, "tables": {}, "error": str(exc),
                 }
-            out[name] = payload
-            progress(i + 1, name)
+            progress(i + 1, name, payload)
             if i < len(names) - 1:
                 time.sleep(1.6)
-        return out
 
     # ------------------------------------------------------------ utils ---
     def _fail(self, kind: str, exc: Exception, partial: Optional[dict] = None) -> None:

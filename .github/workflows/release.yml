@@ -1,11 +1,19 @@
 name: release
 
-# Push a tag matching VERSION (e.g. v1.0.1) → macOS app + DMG built and attached
-# to the GitHub Release. The installed app picks the update up by itself.
+# Build + publish happens ONLY on demand:
+#   * push a tag matching VERSION (e.g. v1.0.1)  → build AND publish
+#   * manual run (workflow_dispatch)             → build only, artifacts
+#     unless the "publish" checkbox is ticked explicitly
+# Pushes to main/branches never build and never publish.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Attach the build to the GitHub Release for the current ref (only meaningful when run on a tag)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +34,9 @@ jobs:
           pip install -r requirements-desktop.txt
           # pin the Playwright node driver to this exact version
           pip install "playwright==1.64.0" || true
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
 
       - name: Check tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/')
@@ -50,7 +61,8 @@ jobs:
           du -sh "$APP"
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+        # tag push (a deliberate act) or a manual run with the publish box ticked
+        if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || inputs.publish == true)
         uses: softprops/action-gh-release@v2
         with:
           name: Tennis Stats ${{ github.ref_name }}

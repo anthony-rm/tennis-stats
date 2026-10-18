@@ -79,7 +79,19 @@ python3 -m venv .venv                # already present in this checkout
 
 Open <http://127.0.0.1:8000>. The Winamax scan starts automatically on server
 start; then press **Fetch odds** and **Fetch stats** (both run as background
-jobs with live progress via SSE).
+jobs with live progress via SSE):
+
+* **Fetch odds** — every match of the list that has no odds yet (the whole
+  list, not only the selected lines; live matches skipped);
+* **↻ Refresh odds** — re-fetch the odds of every match, *including the ones
+  already shown*, because the odds move during the day;
+* **Fetch stats** — every player of the list still missing Tennis Abstract
+  data (already stored players are skipped, stored fetch errors are retried).
+
+The grid fills in **live**: each stored match / player pushes a `data` event
+on the SSE stream and the table reloads (throttled) while the job is still
+running — no need to wait for the end of the pass. The version chip next to
+the title shows the dashboard version.
 
 **Selection = lines × columns (two filters):**
 
@@ -90,8 +102,8 @@ jobs with live progress via SSE).
   boxes **only for the selected lines** (untick a line and its boxes leave the
   copy without being lost);
 * **⧉ Copy selection** copies the boxes of the selected lines; **⧉ Copy match
-  list** copies those matches as `A vs B` lines; **Fetch odds** fetches odds for
-  the selected lines only.
+  list** copies those matches as `A vs B` lines (the fetch buttons are not
+  line-scoped — they always cover the whole list, see above).
 
 Requires Google Chrome installed (Playwright uses `channel="chrome"`, so no
 browser download is needed) and network access to winamax.fr /
@@ -133,25 +145,72 @@ desktop/
   launcher.py       menu-bar app: uvicorn thread, browser, self-updater
   TennisStats.spec  PyInstaller bundle definition
   build_dmg.sh      builds dist/ app + DMG (install) + ZIP (update)
+  run_local.sh      launches dist/ app as a temporary instance (own port, no update)
   make_icon.py      generates the .icns at build time
+Makefile            local build / run / deploy targets (make help)
 tools/build_userscript.py   rebuilds ~/Projets/cotes/useful-tool/script.js
 tests/           pytest suite + HTML/JSON fixtures (offline) + dashboard screenshot
 ```
 
-## Releasing an update
+## Building locally, testing, and deploying on demand
+
+Nothing is ever published by accident: the laptop builds are fully local, and
+GitHub is only touched by an explicit `make deploy`.
+
+### 1. Offline build on this machine
 
 ```bash
-# 1. land the change, keep tests green
-.venv/bin/python -m pytest tests/ -q
-# 2. bump the version and push the tag — CI does the rest
-echo 1.0.1 > VERSION && git commit -am "v1.0.1" && git tag v1.0.1 && git push --tags
+make build-venv   # once, needs network: .venv-build (PyInstaller + PyObjC)
+make build        # tests + app + DMG + ZIP + SHA256SUMS, all in dist/
 ```
 
-`.github/workflows/release.yml` builds `TennisStats-<version>-<arch>.dmg` (first
-install) and `.zip` (updater) on a macOS runner and attaches them to the GitHub
-Release. Installed apps notice the new tag on their next launch (or within six
-hours) and offer the one-click update. Run the workflow manually
-(*Actions → release → Run workflow*) to get a build without publishing.
+After the one-time `build-venv`, `make build` needs **no network**: PyInstaller,
+codesign and hdiutil are local. Artefacts land in `dist/` and are uploaded
+nowhere.
+
+### 2. Run the two (or three) versions side by side
+
+| version | command | URL | state (SQLite) |
+|---|---|---|---|
+| published app (Applications) | `make open-installed` | `:8000` | `~/Library/Application Support/TennisStats` |
+| local files, dev server | `make run` | `:8001` | `<repo>/data` |
+| local files, frozen build | `make app-local` | `:8010` | `<repo>/data` |
+
+All three can run at the same time — each binds its own port and the two local
+ones share the repo's `data/`, so run only **one** local instance at a time.
+
+* `make run` serves `app/` + `web/` straight from this folder and does **not**
+  auto-scan (`AUTOSCAN=1 make run` restores that) — no second Winamax scrape
+  next to the installed app. Restart it after editing Python files; the web UI
+  reloads on refresh.
+* `make app-local` launches `dist/Tennis Stats.app` with
+  `TENNIS_STATS_PORT=8010`, `TENNIS_STATS_NO_UPDATE=1` (the temporary build
+  never replaces itself from the GitHub release) and
+  `TENNIS_STATS_NO_AUTOSCAN=1`. Log: `build/local-run.log`.
+* The installed app is untouched: port 8000, its own state, updates enabled.
+  Quit it from the menu bar when you're done comparing.
+
+### 3. Deploy to GitHub — only when you choose to
+
+```bash
+# step 1 — local only: bump VERSION, commit, tag (nothing leaves the laptop)
+make release VERSION=1.0.1
+git show v1.0.1            # inspect, then:
+
+# step 2 — THE deploy step: push HEAD + its tag → CI builds and publishes
+make deploy
+```
+
+`.github/workflows/release.yml` runs only on a tag push (or a manual run) —
+**pushes to `main` never build and never publish**. It runs the test suite,
+builds `TennisStats-<version>-<arch>.dmg` (first install) and `.zip` (updater)
+on a macOS runner, checks the tag matches `VERSION`, and attaches them to the
+GitHub Release. Installed apps notice the new tag on their next launch (or
+within six hours) and offer the one-click update.
+
+To get a CI build **without** publishing: *Actions → release → Run workflow*
+with the `publish` box unticked (`make ci-build` does the same via the `gh`
+CLI) — the DMG/ZIP arrive as workflow artefacts instead of a release.
 
 ## The shared userscript core
 
@@ -199,10 +258,11 @@ tests verify it parses (`node --check`) and is up to date.
   button that copies the fixed French template with
   `🎯 **<odd line> @<price>**` filled in (`Victoire <surname> @1.38`,
   `Over 21,5 jeux @1.44`, `Kartal -4,5 jeux @2.35` — French decimals).
-  Values are newline-separated — the grid renders them pre-wrapped (whole
-  content visible), the copy formats flatten
-  them. Only the exactly titled sections count (never `1er set - …` or
-  `Nombre de jeux de <player>` variants).
+  Values are newline-separated — in the grid both ladders are **folded to a
+  `▸ N odds` summary by default and develop only while the cell is selected**
+  (tick its box / click the cell; hover the summary to peek at the full list),
+  while the copy formats flatten them. Only the exactly titled sections count
+  (never `1er set - …` or `Nombre de jeux de <player>` variants).
 * Group G (H2H) values come from **P1's** head-to-head table; `never` = both
   players are known and have not met.
 * Unresolved Tennis Abstract ids are flagged in the row (`TA?` badge) instead
@@ -236,20 +296,21 @@ browser (`localStorage`), the LLM format is the initial default.
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/api/version` | dashboard version (from the `VERSION` file) |
 | GET | `/api/columns` | checkbox catalogue (groups A–L) |
-| GET | `/api/matches?form_n=10` | rows + computed values + stats status |
+| GET | `/api/matches?form_n=10` | rows + computed values + stats status (`form_n` defaults to 10) |
 | POST | `/api/scan` | start list scan `{stop_at_night_gap=false, include_live}` |
-| POST | `/api/odds` | start odds pass `{match_ids?}` (default: all pending, live skipped; the UI sends the **selected lines**) |
-| POST | `/api/stats` | start stats fetch `{names?}` (default: all players) |
+| POST | `/api/odds` | start odds pass `{match_ids?, force?}` (default: all missing odds, live skipped; `force=true` re-fetches even stored odds) |
+| POST | `/api/stats` | start stats fetch `{names?}` (default: all players **missing** stats) |
 | GET | `/api/jobs` | job states (polling fallback) |
-| GET | `/api/scan/stream` | SSE progress events |
+| GET | `/api/scan/stream` | SSE events: job progress + `{"type":"data"}` per stored row (live grid) |
 | GET/POST | `/api/selections` | load/save the cell selection |
-| POST | `/api/export` | `{cells, format, form_n}` → `{text, chars, rows, columns}` — `format` ∈ `llm` (default) `tsv` `md` `md_block` `json` |
+| POST | `/api/export` | `{cells, format, form_n?}` → `{text, chars, rows, columns}` — `format` ∈ `llm` (default) `tsv` `md` `md_block` `json` |
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 30 tests, offline (fixtures)
+.venv/bin/python -m pytest tests/ -q      # 37 tests, offline (fixtures)
 ```
 
 * `tests/test_winamax_core.py` — selector regression against real DOM snapshots
@@ -257,6 +318,8 @@ browser (`localStorage`), the LLM format is the initial default.
   "userscript build is up to date" check.
 * `tests/test_app.py` — column computation on frozen Tennis Abstract payloads,
   exporter formats, SQLite semantics.
+* `tests/test_jobs.py` — job targeting (missing vs force vs explicit ids),
+  per-row `data` events, version lookup — Winamax / TA replaced by fakes.
 
 Refresh a fixture with a live capture whenever Winamax changes its DOM:
 
@@ -314,8 +377,12 @@ launchctl load ~/Library/LaunchAgents/com.tennis.stats.scan.plist
 * **Live matches** are listed and flagged, but their odds are not fetched (they
   move too fast) — the odds-derived cells (`a.games`, `a.spread`, …) stay
   `—` for live matches.
-* **Tennis Abstract politeness**: 1.6 s between players, only today's players,
-  24 h cache in `data/cache/<date>/`. Name → id failures (e.g. `Zhang Zhizhen`
+* **Live grid**: the odds / stats jobs emit one SSE `data` event per stored
+  row, and the dashboard reloads on it (at most every 1.5 s) — rows fill in
+  during the pass, not at the end. The viewport (both scroll axes) and the
+  selection survive those mid-pass reloads.
+* **Tennis Abstract politeness**: 1.6 s between players, 24 h cache in
+  `data/cache/<date>/`. Name → id failures (e.g. `Zhang Zhizhen`
   is not in TA's index) surface as the `TA?` badge with the tried variants
   stored in the payload.
 * Schema changes to `data/tennis_stats.db` need a migration — tables are

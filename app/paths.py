@@ -43,3 +43,21 @@ def asset_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     return PROJECT_ROOT
+
+
+def app_version() -> str:
+    """Dashboard version from the VERSION file.
+
+    The desktop build bundles VERSION at the root of the bundle (see
+    ``desktop/TennisStats.spec``), so the same lookup works frozen and in a
+    checkout; ``dev`` is the last-resort fallback.
+    """
+    for base in (asset_dir(), PROJECT_ROOT):
+        path = base / "VERSION"
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return "dev"
