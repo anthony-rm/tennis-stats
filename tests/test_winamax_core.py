@@ -201,6 +201,11 @@ def test_no_page_errors_on_fixtures(browser_loop):
 
 # ----------------------------------------------------------- build check ----
 def test_userscript_build_is_current():
+    # the userscript wrapper lives OUTSIDE this repo (~/Projets/cotes); on a CI
+    # runner it is absent, so the freshness check can only run on this machine
+    ui_js = Path.home() / "Projets" / "cotes" / "useful-tool" / "src" / "ui.js"
+    if not ui_js.exists():
+        pytest.skip(f"userscript project not present ({ui_js})")
     import subprocess
     import sys
     build = Path(__file__).parent.parent / "tools" / "build_userscript.py"
