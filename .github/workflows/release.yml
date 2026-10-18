@@ -1,0 +1,72 @@
+name: release
+
+# Push a tag matching VERSION (e.g. v1.0.1) → macOS app + DMG built and attached
+# to the GitHub Release. The installed app picks the update up by itself.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-desktop.txt
+          # pin the Playwright node driver to this exact version
+          pip install "playwright==1.64.0" || true
+
+      - name: Check tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match VERSION $VERSION"
+            exit 1
+          fi
+
+      - name: Build app, DMG and update ZIP
+        run: bash desktop/build_dmg.sh
+
+      - name: Smoke-test the bundle
+        run: |
+          APP="dist/Tennis Stats.app"
+          test -d "$APP"
+          codesign --verify --deep --strict "$APP"
+          # the bundled interpreter must at least start and reach the launcher
+          ls "$APP/Contents/MacOS/"
+          du -sh "$APP"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tennis Stats ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS-*.txt
+
+      - name: Upload artefacts (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TennisStats-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS-*.txt

@@ -1,0 +1,6 @@
+# Desktop build (PyInstaller + PyObjC) — CI and local packaging only.
+# The dashboard itself needs requirements.txt; this file adds the macOS shell.
+-r requirements.txt
+pyinstaller>=6.10
+pyobjc-framework-Cocoa>=10.3
+pillow>=10.0

@@ -1,0 +1,17 @@
+# -- Python ---------------------------------------------------------------
+.venv/
+.venv-build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# -- local runtime state (DB, Tennis Abstract cache, logs) ----------------
+data/
+
+# -- build artefacts ------------------------------------------------------
+build/
+dist/
+*.spec.bak
+
+# -- macOS ----------------------------------------------------------------
+.DS_Store

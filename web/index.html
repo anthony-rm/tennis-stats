@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Tennis Betting Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --fg: #16181d;
+    --muted: #6b7280;
+    --border: #d9dde3;
+    --accent: #0f6f8f;
+    --accent-soft: #e2f1f6;
+    --ok: #157347;
+    --warn: #b45309;
+    --err: #b42318;
+    --sel: #e8f8f0;
+    --sel-border: #63c49b;
+    --row-hover: #f0f4f8;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1b1e24; --fg: #e8eaed; --muted: #9aa2ad;
+      --border: #2c313a; --accent: #4db6d8; --accent-soft: #12313c;
+      --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+      --sel: #15301f; --sel-border: #3fa876; --row-hover: #22262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 30;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 16px 8px;
+  }
+  .title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .jobs { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 2px 10px; font-size: 12px; color: var(--muted); background: var(--bg);
+    max-width: 380px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  .chip strong { color: var(--fg); font-weight: 600; }
+  .chip.running { border-color: var(--accent); color: var(--accent); }
+  .chip.done strong { color: var(--ok); }
+  .chip.error { border-color: var(--err); color: var(--err); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+  .chip.running .dot { animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 9px; }
+  .toolbar.secondary {
+    margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--border);
+  }
+  button, select, input[type="search"] {
+    font: inherit; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px;
+    box-sizing: border-box; height: 32px; padding: 0 11px; line-height: 20px;
+  }
+  /* one canonical checkbox everywhere: body cells, header, line picks, filters */
+  input[type="checkbox"] {
+    accent-color: var(--accent); width: 15px; height: 15px;
+    margin: 0; flex: none; cursor: pointer; vertical-align: middle;
+  }
+  input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .55; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.1); }
+  input[type="search"] { min-width: 210px; padding: 0 10px; }
+  select { padding: 0 8px; }
+  input[type="search"]::placeholder { color: var(--muted); }
+  label.inline { display: inline-flex; gap: 5px; align-items: center; font-size: 13px; color: var(--muted); }
+  .spacer { flex: 1; }
+  .count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* quick-select chips (second toolbar row) */
+  .quick-label { font-size: 12.5px; color: var(--muted); margin-right: 2px; }
+  .quick {
+    border-radius: 999px; box-sizing: border-box; height: 32px;
+    padding: 0 12px; line-height: 20px; font-size: 12.5px;
+    color: var(--muted); background: var(--panel);
+  }
+  .quick:hover:not(:disabled) { color: var(--accent); }
+  .quick[aria-pressed="true"] {
+    background: var(--accent-soft); border-color: var(--accent);
+    color: var(--accent); font-weight: 600;
+  }
+  .quick.partial { border-color: var(--accent); color: var(--accent); }
+  .sep { width: 1px; height: 20px; background: var(--border); flex: none; }
+
+  main { padding: 14px 16px 16px; }
+  .empty {
+    border: 1px dashed var(--border); border-radius: 8px; background: var(--panel);
+    padding: 34px 20px; text-align: center; color: var(--muted); margin-top: 18px;
+  }
+  .empty strong { color: var(--fg); display: block; margin-bottom: 4px; font-size: 15px; }
+
+  .table-wrap {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    overflow: auto; max-height: calc(100vh - var(--hdr, 170px) - 34px);
+  }
+  table { border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 7px 10px; }
+  thead th {
+    position: sticky; background: var(--panel); z-index: 10;
+    text-align: left; font-weight: 600; white-space: nowrap; vertical-align: bottom;
+  }
+  thead tr.groups th { top: 0; z-index: 12; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: .4px; color: var(--muted); border-bottom: 1px solid var(--muted); }
+  thead tr.cols th { top: var(--gh, 27px); z-index: 11; max-width: 170px; }
+  /* group boundaries, header only — the body stays free of vertical rules */
+  thead tr.groups th:not(:first-child),
+  thead tr.cols th.group-start { border-left: 1px solid var(--border); }
+  th.sticky-col, td.sticky-col {
+    position: sticky; left: 0; background: var(--panel); z-index: 14;
+    min-width: 250px; max-width: 320px; border-right: 2px solid var(--border);
+  }
+  /* frozen first header cell must outrank EVERY other header cell: the group /
+     column rules above are equally specific, so without this the scrolling
+     headers paint over the Match header during horizontal scrolling. */
+  thead tr th.sticky-col { z-index: 30; }
+  tbody tr:hover td { background: var(--row-hover); }
+  tbody tr:hover td.sticky-col { background: var(--row-hover); }
+  tbody td { max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  tbody td.sticky-col { white-space: normal; overflow: hidden; }
+  /* end of a match block (second player row) */
+  tbody tr.p2 td { border-bottom: 2px solid var(--border); }
+  tbody tr.inactive { opacity: .45; }
+  /* multi-line cells show their whole content, wrapped */
+  tbody td.wrap { max-width: 340px; min-width: 190px; white-space: pre-wrap;
+    overflow: visible; text-overflow: clip; vertical-align: top; }
+  tbody td.wrap .line { align-items: flex-start; }
+  tbody td.wrap .val { white-space: pre-wrap; overflow: visible; text-overflow: clip; }
+  tbody td.wrap .odd-copy { margin-top: 2px; }
+  /* day separator rows */
+  tbody tr.day-row td {
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border); padding: 6px 10px;
+  }
+  tbody tr.day-row .day-cell { display: flex; align-items: center; gap: 10px; }
+  tbody tr.day-row .day-label {
+    font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+    color: var(--fg);
+  }
+  .day-pick {
+    height: 24px; padding: 0 10px; font-size: 12px; line-height: 16px;
+    border-radius: 999px; background: var(--panel);
+  }
+  tbody td.no-match { text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
+  tbody td.collapsed-col { max-width: 60px; min-width: 44px; }
+
+  .group-head { display: flex; gap: 7px; align-items: center; cursor: pointer; user-select: none; }
+  .group-head .caret { font-size: 9px; color: var(--muted); }
+  .col-head { display: flex; gap: 5px; align-items: center; }
+  .col-head .lbl { cursor: help; border-bottom: 1px dotted var(--muted); }
+
+  .cell-box { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+  .cell-box > input[type="checkbox"] { margin-top: 3px; }
+  .lines { min-width: 0; flex: 1; cursor: pointer; }
+  .lines.disabled { cursor: not-allowed; }
+  .line { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+  .line .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* one copy button per Winamax odd */
+  .odd-copy {
+    height: 20px; min-width: 24px; padding: 0 4px; line-height: 18px;
+    font-size: 11px; border-radius: 5px; flex: none; margin-top: 1px; opacity: .5;
+  }
+  .odd-copy:hover:not(:disabled) { opacity: 1; }
+  td.selected { background: var(--sel) !important; box-shadow: inset 0 0 0 1px var(--sel-border); }
+  tbody tr:hover td.selected { background: var(--sel) !important; }
+
+  .match-line { display: flex; gap: 8px; align-items: flex-start; }
+  .match-line .row-pick { margin: 3px 0 0; }
+  .match-text { min-width: 0; flex: 1; }
+  .match-name { font-weight: 600; }
+  .match-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+
+  /* selection feedback on headers (checked / partially checked) */
+  #head-cols input[data-col]:checked + .lbl,
+  #head-cols input[data-col][data-state="some"] + .lbl {
+    color: var(--accent); font-weight: 600;
+  }
+  #head-groups input[data-group]:checked ~ .gname,
+  #head-groups input[data-group][data-state="some"] ~ .gname {
+    color: var(--accent); font-weight: 700;
+  }
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .3px;
+    border-radius: 4px; padding: 0 5px; vertical-align: 1px; margin-left: 6px;
+  }
+  .badge.live { background: #b42318; color: #fff; }
+  .badge.odds { background: var(--accent-soft); color: var(--accent); }
+  .badge.ta-warn { background: #fff3cd; color: #7a5b00; border: 1px solid #e6c229; }
+  @media (prefers-color-scheme: dark) { .badge.ta-warn { background: #3a3312; color: #fbbf24; } }
+  .badge.ta-ok { background: transparent; color: var(--ok); border: 1px solid var(--ok); font-weight: 600; }
+
+  #toast {
+    position: fixed; right: 18px; bottom: 18px; z-index: 50;
+    background: var(--fg); color: var(--bg); border-radius: 7px;
+    padding: 9px 15px; font-size: 13px; opacity: 0; transform: translateY(6px);
+    transition: all .18s ease; pointer-events: none; max-width: 60vw;
+  }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.err { background: var(--err); color: #fff; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <h1>Tennis Betting Dashboard</h1>
+    <div class="jobs" id="jobs" aria-live="polite">
+      <span class="chip" id="job-scan"><span class="dot"></span><strong>scan</strong> <span>connecting…</span></span>
+      <span class="chip" id="job-odds"><span class="dot"></span><strong>odds</strong> <span>idle</span></span>
+      <span class="chip" id="job-stats"><span class="dot"></span><strong>stats</strong> <span>idle</span></span>
+    </div>
+  </div>
+  <div class="toolbar">
+    <button class="primary" id="btn-scan" title="Re-scan the whole Winamax tennis list (all days)">↻ Refresh list</button>
+    <button id="btn-odds" title="Extract every market for the selected matches (tick a line or a day)">Fetch odds</button>
+    <button id="btn-stats" title="Fetch Tennis Abstract stats for every player in the list">Fetch stats</button>
+    <label class="inline" title="Window used by the form columns (last N tour matches)">Form last
+      <select id="form-n" aria-label="Form window (last N matches)">
+        <option>5</option><option selected>10</option><option>15</option><option>20</option>
+      </select>
+    </label>
+    <span class="spacer"></span>
+    <input type="search" id="search" placeholder="Search player / tournament…" aria-label="Search matches">
+    <label class="inline"><input type="checkbox" id="hide-live"> hide live</label>
+  </div>
+  <div class="toolbar secondary">
+    <span class="quick-label">Quick select (selected lines only):</span>
+    <button class="quick" data-quick="match" aria-pressed="false"
+            title="Tournament, round, start time, day — shown in the row summary / day header, copied with the selection (on by default)">Match info</button>
+    <button class="quick" data-quick="odds" aria-pressed="false"
+            title="1X2 odds, total games, games spread (off by default)">Odds</button>
+    <button class="quick" data-quick="stats" aria-pressed="false"
+            title="Every Tennis Abstract column — identity, form, surface, season, H2H, advanced, point-by-point, rankings (off by default)">Player statistics</button>
+    <button class="quick" data-quick="derived" aria-pressed="false"
+            title="Computed comparison columns: rank / Elo / surface / DR / form / H2H gaps">Derived</button>
+    <span class="sep"></span>
+    <button id="btn-none" title="Clear every checked box (the selected matches stay selected)">Clear cells</button>
+    <span class="spacer"></span>
+    <label class="inline" title="Copy format — the LLM format is one labelled line per field, grouped by section">Format
+      <select id="format" aria-label="Copy format">
+        <option value="llm">LLM (structured text)</option>
+        <option value="tsv">TSV (Excel)</option>
+        <option value="md">Markdown table</option>
+        <option value="md_block">Markdown per match</option>
+        <option value="json">JSON</option>
+      </select>
+    </label>
+    <button class="primary" id="btn-copy">⧉ Copy selection</button>
+    <button id="btn-copy-list" title="Copy the selected matches as 'A vs B' lines">⧉ Copy match list</button>
+    <span class="count" id="count">0 matches · 0 cells · 0 cols</span>
+  </div>
+</header>
+
+<main>
+  <div class="empty" id="empty" hidden>
+    <strong id="empty-title">Loading…</strong>
+    <span id="empty-text">Fetching columns and matches.</span>
+  </div>
+  <div class="table-wrap" id="table-wrap" hidden>
+    <table id="grid">
+      <thead>
+        <tr class="groups" id="head-groups"></tr>
+        <tr class="cols" id="head-cols"></tr>
+      </thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+const state = {
+  groups: [], columns: [], rows: [], raw: [], rawById: new Map(),
+  selection: new Map(),        // match_id -> Set(col_id)   (stored boxes)
+  lines: new Set(),            // match_id of the selected lines (the filter)
+  selectionTouched: false,     // the user changed the cells in this browser
+  linesTouched: false,         // the user changed the lines in this browser
+  defaultApplied: false,
+  format: "llm", formN: 10,
+  search: "", hideLive: false,
+  collapsed: new Set(),
+  jobs: {}, loadedOnce: false,
+};
+
+/* Preset column sets behind the quick-select chips (ids are the API contract). */
+const QUICK = {
+  match: ["a.tournament", "a.round", "a.start", "a.day"],
+  odds: ["a.odds", "a.games", "a.spread"],
+  derived: null,   // group I, filled once the catalogue is loaded
+  stats: null,     // every non-A / non-I group, filled once loaded
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* Winamax odd columns: every line of these cells gets a 🎾 copy button. */
+const ODDS_COLS = new Set(["a.odds", "a.games", "a.spread"]);
+
+const surname = (name) => String(name || "").trim().split(/\s+/).pop() || "";
+
+/* is this line a readable Winamax odd? ("1.38" or "Over 21.5: 1.47"; not "—") */
+const isOddLine = (colId, line) =>
+  colId === "a.odds" ? /^\d/.test(line) : betFromLine(line) !== null;
+
+/* "Over 21.5: 1.47"  -> "Over 21,5 jeux @1.47"
+   "Zverev -6.5: 7.25" -> "Zverev -6,5 jeux @7.25"                        */
+function betFromLine(line) {
+  const i = line.lastIndexOf(": ");
+  if (i < 0) return null;
+  const subject = line.slice(0, i).trim();
+  const odd = line.slice(i + 2).trim().replace(",", ".");
+  if (!subject || !/^\d/.test(odd)) return null;
+  const fr = subject.replace(/\d+(?:[.,]\d+)?/, (n) => n.replace(".", ","));
+  return `${fr} jeux @${odd}`;
+}
+
+/* Fixed template — only the tournament / match / bet line change. */
+function analysisMessage(tournament, matchLine, bet) {
+  const tour = String(tournament || "").replace(/\s*-\s*/, " ").trim() || "?";
+  return [
+    "🎾 ANALYSE DU JOUR — Le Coup Droit",
+    "",
+    `__${tour}__ · ${matchLine}`,
+    "",
+    `🎯 **${bet}**`,
+    "",
+    "⚠️ __Contenu analytique uniquement — pas un conseil de pari, aucune garantie de gains.__",
+    "__Chaque membre est seul responsable de ses décisions. Les performances passées ne garantissent pas les résultats futurs.__",
+    "__Jeu responsable : 09 74 75 13 13__",
+  ].join("\n");
+}
+
+async function copyOdd(r, colId, line, playerName) {
+  const meta = state.rawById.get(r.match_id) || {};
+  const matchLine = `${surname(r.player1)} vs ${surname(r.player2)}`;
+  let bet;
+  if (colId === "a.odds") {
+    const odd = line.trim().replace(",", ".");
+    if (!/^\d/.test(odd)) { toast("No odd on this line", true); return; }
+    bet = `Victoire ${surname(playerName || r.player1)} @${odd}`;
+  } else {
+    bet = betFromLine(line);
+    if (!bet) { toast("Cannot read this odd", true); return; }
+  }
+  const ok = await copyText(analysisMessage(meta.tournament, matchLine, bet));
+  if (ok) toast(`Copied 🎾 ${bet}`);
+  else toast("Clipboard blocked", true);
+}
+
+/* ---------------------------- helpers ---------------------------------- */
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({headers: {"Content-Type": "application/json"}}, opts || {}));
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    try { const j = await res.json(); if (j.detail) msg = j.detail; } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 3400);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) { /* fall through to execCommand */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/* ---- days (the table is grouped by day: "Today (16/10/2026)") ---------- */
+function rowDay(r) { return ((r.values || {})["a.day"]) || ""; }
+function dayDateKey(r) {
+  const m = /\((\d{2})\/(\d{2})\/(\d{4})\)$/.exec(rowDay(r));
+  return m ? `${m[3]}${m[2]}${m[1]}` : "99999999";
+}
+function timeKey(r) {
+  const meta = state.rawById.get(r.match_id) || {};
+  if (r.live) return -1;                                  // in play first
+  const t = meta.start_local || "";
+  return /^\d{1,2}:\d{2}$/.test(t) ? parseInt(t.split(":")[0], 10) * 60 +
+       parseInt(t.split(":")[1], 10) : 9999;
+}
+
+function visibleRows() {
+  const q = state.search.trim().toLowerCase();
+  const rows = state.rows.filter((r) => {
+    if (state.hideLive && r.live) return false;
+    if (!q) return true;
+    const meta = state.rawById.get(r.match_id);
+    return (r.player1 + " " + r.player2 + " " + (meta ? meta.tournament + " " + meta.round : ""))
+      .toLowerCase().includes(q);
+  });
+  // grouped by day, live first, then kick-off time
+  return rows.sort((a, b) =>
+    dayDateKey(a).localeCompare(dayDateKey(b)) ||
+    timeKey(a) - timeKey(b) ||
+    (a.player1 || "").localeCompare(b.player1 || ""));
+}
+
+/* selected lines = the matches that take part in chips / copy (the filter) */
+function isActive(mid) { return state.lines.has(mid); }
+function activeRows() { return visibleRows().filter((r) => state.lines.has(r.match_id)); }
+
+function isSelected(mid, col) {
+  const s = state.selection.get(mid);
+  return !!s && s.has(col);
+}
+
+function setCell(mid, col, on) {
+  let s = state.selection.get(mid);
+  if (on) {
+    if (!s) { s = new Set(); state.selection.set(mid, s); }
+    s.add(col);
+  } else if (s) {
+    s.delete(col);
+    if (!s.size) state.selection.delete(mid);
+  }
+}
+
+/* Cells for matches that no longer exist (pruned by a re-scan) are dead weight. */
+function pruneSelection() {
+  const ids = new Set(state.rows.map((r) => r.match_id));
+  for (const mid of [...state.selection.keys()]) if (!ids.has(mid)) state.selection.delete(mid);
+}
+function pruneLines() {
+  const ids = new Set(state.rows.map((r) => r.match_id));
+  for (const mid of [...state.lines]) if (!ids.has(mid)) state.lines.delete(mid);
+}
+
+function markTouched() {
+  if (state.selectionTouched) return;
+  state.selectionTouched = true;
+  try { localStorage.setItem("ts.touched", "1"); } catch (e) {}
+}
+
+function persistLines() {
+  state.linesTouched = true;
+  try { localStorage.setItem("ts.lines", JSON.stringify([...state.lines])); } catch (e) {}
+}
+
+/* What will be copied: boxes of the selected lines only. */
+function exportCells() {
+  const out = {};
+  for (const [mid, set] of state.selection) {
+    if (state.lines.has(mid) && set.size) out[mid] = [...set];
+  }
+  return out;
+}
+
+function updateCount() {
+  const cells = exportCells();
+  const cellCount = Object.values(cells).reduce((a, v) => a + v.length, 0);
+  const cols = new Set(Object.values(cells).flat());
+  const shown = visibleRows().length;
+  $("count").textContent = state.rows.length
+    ? `${activeRows().length}/${shown} matches · ${cellCount} cells · ${cols.size} cols`
+    : `0 matches · 0 cells · 0 cols`;
+}
+
+let saveTimer = null;
+function persistSelection() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    const cells = {};
+    for (const [mid, set] of state.selection) cells[mid] = [...set];
+    try { await api("/api/selections", {method: "POST", body: JSON.stringify({cells, format: state.format})}); }
+    catch (e) { /* non-fatal */ }
+  }, 700);
+}
+
+/* --------------------- quick-select presets ---------------------------- */
+function quickCols(key) {
+  if (key === "match" || key === "odds") return QUICK[key];
+  if (key === "derived") return QUICK.derived || [];
+  if (key === "stats") return QUICK.stats || [];
+  return [];
+}
+
+/* chips are filters: they only fill boxes of the selected lines */
+function cellsOver(rows, ids) {
+  const total = rows.length * ids.length;
+  if (!total) return "none";
+  let on = 0;
+  for (const r of rows) for (const c of ids) if (isSelected(r.match_id, c)) on++;
+  return on === 0 ? "none" : (on === total ? "all" : "some");
+}
+
+function quickState(key) { return cellsOver(activeRows(), quickCols(key)); }
+
+function selectCols(ids, on) {
+  for (const r of activeRows()) for (const c of ids) setCell(r.match_id, c, on);
+}
+
+function refreshQuick() {
+  for (const btn of document.querySelectorAll(".quick")) {
+    const st = quickState(btn.dataset.quick);
+    btn.setAttribute("aria-pressed", st === "all" ? "true" : "false");
+    btn.classList.toggle("partial", st === "some");
+  }
+}
+
+function buildQuickSets() {
+  QUICK.derived = (state.groups.find((g) => g.id === "I") || {columns: []})
+    .columns.map((c) => c.id);
+  QUICK.stats = state.groups
+    .filter((g) => g.id !== "A" && g.id !== "I")
+    .flatMap((g) => g.columns.map((c) => c.id));
+}
+
+function applyCheck(cb, st) {
+  cb.checked = st === "all";
+  cb.indeterminate = st === "some";
+  cb.dataset.state = st;
+}
+
+function refreshHeadStates() {
+  const rows = activeRows();
+  for (const cb of document.querySelectorAll("#head-cols input[data-col]")) {
+    applyCheck(cb, cellsOver(rows, [cb.dataset.col]));
+  }
+  for (const cb of document.querySelectorAll("#head-groups input[data-group]")) {
+    const g = state.groups.find((x) => x.id === cb.dataset.group);
+    if (g) applyCheck(cb, cellsOver(rows, g.columns.map((c) => c.id)));
+  }
+  const allCb = $("all-cols");
+  if (allCb) applyCheck(allCb, cellsOver(rows, state.columns.map((c) => c.id)));
+  refreshQuick();
+}
+
+/* layout sync: sticky offsets and table height follow the real header size */
+function syncLayout() {
+  const hdr = document.querySelector("header");
+  if (hdr) document.documentElement.style.setProperty("--hdr", hdr.offsetHeight + "px");
+  const gRow = $("head-groups");
+  if (gRow && gRow.offsetHeight) document.documentElement.style.setProperty("--gh", gRow.offsetHeight + "px");
+}
+
+/* ---------------------------- rendering -------------------------------- */
+function visibleCols(g) { return g.columns.filter((c) => !c.hidden); }
+
+function renderHead() {
+  const gRow = $("head-groups"), cRow = $("head-cols");
+  gRow.innerHTML = ""; cRow.innerHTML = "";
+
+  const sticky = document.createElement("th");
+  sticky.className = "sticky-col";
+  sticky.scope = "col";
+  sticky.title = "Top row = first player, bottom row = second player";
+  sticky.innerHTML = '<span style="font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;">Match</span>';
+  gRow.appendChild(sticky);
+
+  const sticky2 = document.createElement("th");
+  sticky2.className = "sticky-col"; sticky2.scope = "col";
+  sticky2.innerHTML = '<label class="inline" title="Every column, for the selected lines only">' +
+    '<input type="checkbox" id="all-cols"> all columns</label>';
+  cRow.appendChild(sticky2);
+
+  for (const g of state.groups) {
+    const cols = visibleCols(g);
+    const gh = document.createElement("th");
+    gh.scope = "colgroup";
+    gh.colSpan = state.collapsed.has(g.id) ? 1 : Math.max(1, cols.length);
+    const lab = document.createElement("label");
+    lab.className = "group-head";
+    lab.title = "Click to collapse / expand this group";
+    lab.innerHTML = `<input type="checkbox" data-group="${esc(g.id)}" title="Select whole group (selected lines)">
+      <span class="caret">${state.collapsed.has(g.id) ? "▶" : "▼"}</span><span class="gname"> ${esc(g.label)}</span>`;
+    lab.querySelector("input").addEventListener("change", (e) => toggleGroup(g, e.target.checked));
+    lab.addEventListener("click", (e) => {
+      if (e.target.tagName === "INPUT") return;
+      state.collapsed.has(g.id) ? state.collapsed.delete(g.id) : state.collapsed.add(g.id);
+      render();
+    });
+    gh.appendChild(lab);
+    gRow.appendChild(gh);
+
+    if (state.collapsed.has(g.id)) {
+      const ch = document.createElement("th");
+      ch.scope = "col";
+      ch.classList.add("group-start");
+      ch.innerHTML = `<span class="count">${cols.length} cols</span>`;
+      cRow.appendChild(ch);
+      continue;
+    }
+    let first = true;
+    for (const c of cols) {
+      const th = document.createElement("th");
+      th.scope = "col";
+      if (first) th.classList.add("group-start");
+      first = false;
+      const lab = document.createElement("label");
+      lab.className = "col-head";
+      lab.innerHTML = `<input type="checkbox" data-col="${esc(c.id)}" title="Select column (selected lines)">
+        <span class="lbl" title="${esc(c.hint || c.label)}">${esc(c.label)}</span>`;
+      lab.querySelector("input").addEventListener("change", (e) => toggleColumn(c.id, e.target.checked));
+      th.appendChild(lab);
+      cRow.appendChild(th);
+    }
+  }
+  const allCb = $("all-cols");
+  if (allCb) allCb.addEventListener("change", (e) => toggleAllColumns(e.target.checked));
+  refreshHeadStates();
+}
+
+function toggleGroup(group, on) {
+  markTouched();
+  selectCols(group.columns.map((c) => c.id), on);
+  refreshCells();
+  updateCount(); persistSelection();
+}
+
+function toggleColumn(colId, on) {
+  markTouched();
+  selectCols([colId], on);
+  refreshCells();
+  updateCount(); persistSelection();
+}
+
+function toggleAllColumns(on) {
+  markTouched();
+  selectCols(state.columns.map((c) => c.id), on);
+  refreshCells();
+  updateCount(); persistSelection();
+}
+
+function buildSpecs() {
+  const specs = [];
+  for (const g of state.groups) {
+    if (state.collapsed.has(g.id)) { specs.push({placeholder: g}); continue; }
+    for (const c of visibleCols(g)) specs.push({col: c});
+  }
+  return specs;
+}
+
+function cellTd(r, c, text, active, playerName) {
+  const td = document.createElement("td");
+  td.dataset.col = c.id;
+  const val = text == null || text === "" ? "—" : text;
+  if (String(val).includes("\n")) td.classList.add("wrap");
+  const on = active && isSelected(r.match_id, c.id);
+  if (on) td.classList.add("selected");
+  const multiline = String(val).includes("\n");
+  const canCopy = active && ODDS_COLS.has(c.id);
+
+  const box = document.createElement("div");
+  box.className = "cell-box";
+
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "cell-check";
+  cb.checked = on;
+  cb.disabled = !active;
+  if (!active) cb.title = "select the line first";
+  cb.addEventListener("change", () => {
+    markTouched();
+    setCell(r.match_id, c.id, cb.checked);
+    refreshCells();
+    updateCount(); persistSelection();
+  });
+  box.appendChild(cb);
+
+  const linesEl = document.createElement("div");
+  linesEl.className = "lines" + (active ? "" : " disabled");
+  for (const ln of String(val).split("\n")) {
+    const line = document.createElement("div");
+    line.className = "line";
+    const span = document.createElement("span");
+    span.className = "val";
+    span.title = multiline ? ln : val;
+    span.textContent = ln.trim() === "" ? "\u00a0" : ln;
+    line.appendChild(span);
+    if (canCopy && ln.trim() && isOddLine(c.id, ln.trim())) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "odd-copy";
+      btn.textContent = "🎾";
+      btn.title = "Copy the analysis message for this odd";
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        copyOdd(r, c.id, ln.trim(), playerName);
+      });
+      line.appendChild(btn);
+    }
+    linesEl.appendChild(line);
+  }
+  box.appendChild(linesEl);
+  linesEl.addEventListener("click", (e) => {
+    if (e.target.closest(".odd-copy") || cb.disabled) return;
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event("change"));
+  });
+  td.appendChild(box);
+  return td;
+}
+
+function splitPair(val) {
+  const s = String(val == null ? "" : val);
+  const i = s.indexOf(" | ");
+  return i === -1 ? [s, ""] : [s.slice(0, i), s.slice(i + 3)];
+}
+
+function matchFragment(r, specs) {
+  const frag = document.createDocumentFragment();
+  const meta = state.rawById.get(r.match_id) || {};
+  const active = isActive(r.match_id);
+
+  const tr1 = document.createElement("tr");
+  const tr2 = document.createElement("tr");
+  tr1.dataset.mid = tr2.dataset.mid = r.match_id;
+  tr1.className = "p1" + (active ? "" : " inactive");
+  tr2.className = "p2" + (active ? "" : " inactive");
+
+  /* frozen summary cell, shared by both player rows */
+  const td0 = document.createElement("td");
+  td0.className = "sticky-col";
+  td0.rowSpan = 2;
+  const badges = [];
+  if (r.live) badges.push('<span class="badge live">LIVE</span>');
+  if (r.has_odds) badges.push('<span class="badge odds">odds</span>');
+  const st = r.stats_status || {};
+  if (st.p1 === "ok" && st.p2 === "ok") badges.push('<span class="badge ta-ok">TA</span>');
+  else if (st.p1 === "unresolved" || st.p2 === "unresolved" ||
+           st.p1 === "missing" || st.p2 === "missing")
+    badges.push('<span class="badge ta-warn" title="Tennis Abstract data missing for at least one player — press Fetch stats">TA?</span>');
+  const line = document.createElement("div");
+  line.className = "match-line";
+  const rowCb = document.createElement("input");
+  rowCb.type = "checkbox";
+  rowCb.className = "row-pick";
+  rowCb.checked = active;
+  rowCb.title = "Include this match in the selection (chips & copy)";
+  rowCb.addEventListener("change", () => {
+    rowCb.checked ? state.lines.add(r.match_id) : state.lines.delete(r.match_id);
+    persistLines();
+    refreshCells();
+    updateCount();
+  });
+  const txt = document.createElement("div");
+  txt.className = "match-text";
+  const metaParts = [meta.tournament, meta.round, meta.start_local, r.live ? "in play" : ""]
+    .filter((p) => p !== undefined && p !== null && String(p).trim() !== "");
+  txt.innerHTML =
+    `<div class="match-name">${esc(r.player1)} vs ${esc(r.player2)}${badges.join("")}</div>` +
+    `<div class="match-meta">${esc(metaParts.join(" · "))}</div>`;
+  line.appendChild(rowCb);
+  line.appendChild(txt);
+  td0.appendChild(line);
+  tr1.appendChild(td0);
+
+  for (const spec of specs) {
+    if (spec.placeholder) {
+      const td = document.createElement("td");
+      td.className = "collapsed-col";
+      td.rowSpan = 2;
+      tr1.appendChild(td);
+      continue;
+    }
+    const c = spec.col;
+    const val = (r.values || {})[c.id] ?? "—";
+    if (c.pair) {
+      const [v1, v2] = splitPair(val);
+      tr1.appendChild(cellTd(r, c, v1, active, r.player1));
+      tr2.appendChild(cellTd(r, c, v2, active, r.player2));
+    } else {
+      const td = cellTd(r, c, val, active);
+      td.rowSpan = 2;
+      tr1.appendChild(td);
+    }
+  }
+  frag.appendChild(tr1);
+  frag.appendChild(tr2);
+  return frag;
+}
+
+function dayFragment(label, dayRows, colspan) {
+  const tr = document.createElement("tr");
+  tr.className = "day-row";
+  const td = document.createElement("td");
+  td.colSpan = colspan;
+  const on = dayRows.filter((r) => isActive(r.match_id)).length;
+  const all = on === dayRows.length && dayRows.length > 0;
+  td.innerHTML = `<div class="day-cell">
+      <span class="day-label">${esc(label)}</span>
+      <button class="day-pick" data-day="${esc(label)}"
+        title="Select (or clear) every match of this day">${all ? "Clear day" : "Select day"}</button>
+      <span class="count">${on}/${dayRows.length} selected</span>
+    </div>`;
+  td.querySelector(".day-pick").addEventListener("click", () => toggleDay(label));
+  tr.appendChild(td);
+  return tr;
+}
+
+function toggleDay(label) {
+  const rows = visibleRows().filter((r) => rowDay(r) === label);
+  if (!rows.length) return;
+  const allOn = rows.every((r) => isActive(r.match_id));
+  for (const r of rows) allOn ? state.lines.delete(r.match_id) : state.lines.add(r.match_id);
+  persistLines();
+  refreshCells();
+  updateCount();
+}
+
+function renderBody() {
+  const body = $("body");
+  body.innerHTML = "";
+  const rows = visibleRows();
+  const specs = buildSpecs();
+  const colspan = specs.length + 1;
+  const frag = document.createDocumentFragment();
+
+  let currentDay = null;
+  for (const r of rows) {
+    const day = rowDay(r);
+    if (day !== currentDay) {
+      currentDay = day;
+      frag.appendChild(dayFragment(day, rows.filter((x) => rowDay(x) === day), colspan));
+    }
+    frag.appendChild(matchFragment(r, specs));
+  }
+  body.appendChild(frag);
+
+  if (!rows.length && state.rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.className = "no-match";
+    td.colSpan = colspan;
+    td.textContent = "No match for the current search.";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  refreshHeadStates();
+}
+
+function refreshCells() {
+  const rowsById = new Map(state.rows.map((r) => [r.match_id, r]));
+  for (const tr of $("body").children) {
+    const mid = tr.dataset.mid;
+    if (!mid) continue;
+    const active = isActive(mid);
+    if (tr.classList.contains("day-row")) continue;
+    tr.classList.toggle("inactive", !active);
+    for (const td of tr.children) {
+      if (!td.dataset.col) continue;
+      const on = active && isSelected(mid, td.dataset.col);
+      td.classList.toggle("selected", on);
+      const cb = td.querySelector("input.cell-check");
+      if (cb) { cb.checked = on; cb.disabled = !active; }
+      const lines = td.querySelector(".lines");
+      if (lines) lines.classList.toggle("disabled", !active);
+      for (const btn of td.querySelectorAll(".odd-copy")) btn.disabled = !active;
+    }
+    const rowCb = tr.querySelector(".row-pick");
+    if (rowCb) rowCb.checked = active;
+  }
+  // day header buttons / counters
+  for (const tr of $("body").querySelectorAll("tr.day-row")) {
+    const btn = tr.querySelector(".day-pick");
+    if (!btn) continue;
+    const label = btn.dataset.day;
+    const dayRows = visibleRows().filter((r) => rowDay(r) === label);
+    const on = dayRows.filter((r) => isActive(r.match_id)).length;
+    const all = dayRows.length > 0 && on === dayRows.length;
+    btn.textContent = all ? "Clear day" : "Select day";
+    const cnt = tr.querySelector(".count");
+    if (cnt) cnt.textContent = `${on}/${dayRows.length} selected`;
+  }
+  refreshHeadStates();
+}
+
+/* Default preset: an untouched, empty selection starts with "Match info"
+   checked on today's selected lines — Odds / Player statistics stay off. */
+function maybeApplyDefaultSelection() {
+  if (state.selectionTouched) return;
+  if (!state.defaultApplied && state.selection.size > 0) return;   // a saved selection wins
+  const cols = QUICK.match;
+  if (!cols.length || !state.rows.length) return;
+  for (const r of activeRows()) for (const c of cols) setCell(r.match_id, c, true);
+  state.defaultApplied = true;
+}
+
+/* Selected lines: the user's own choice when stored, today's matches otherwise. */
+function initLines() {
+  let stored = null;
+  try { stored = localStorage.getItem("ts.lines"); } catch (e) {}
+  if (stored) {
+    try {
+      state.lines = new Set(JSON.parse(stored) || []);
+      state.linesTouched = true;
+    } catch (e) {}
+  } else {
+    const today = state.rows.filter((r) => /^\s*Today\b/.test(rowDay(r)));
+    state.lines = new Set((today.length ? today : state.rows).map((r) => r.match_id));
+  }
+  pruneLines();
+}
+
+function render() {
+  const hasRows = state.rows.length > 0;
+  $("table-wrap").hidden = !hasRows;
+  $("empty").hidden = hasRows;
+  if (!hasRows) {
+    const scan = state.jobs.scan || {};
+    if (scan.status === "running") {
+      $("empty-title").textContent = "Scanning Winamax…";
+      $("empty-text").textContent = scan.message || "Opening the tennis list.";
+    } else if (scan.status === "error") {
+      $("empty-title").textContent = "Scan failed";
+      $("empty-text").textContent = scan.message || "unknown error";
+    } else {
+      $("empty-title").textContent = "No matches yet";
+      $("empty-text").textContent = "Press “Refresh list” to scan the tennis matches on Winamax.";
+    }
+    updateCount();
+    syncLayout();
+    return;
+  }
+  renderHead();
+  renderBody();
+  updateCount();
+  syncLayout();
+}
+
+function renderJobs() {
+  for (const kind of ["scan", "odds", "stats"]) {
+    const j = state.jobs[kind];
+    const el = $("job-" + kind);
+    if (!el || !j) continue;
+    el.className = "chip " + (j.status || "");
+    let txt = j.status === "running"
+      ? (j.total ? `${j.step || 0}/${j.total} ${j.message || ""}` : (j.message || "working…"))
+      : (j.message || j.status);
+    if (j.status === "idle") txt = "idle";
+    el.querySelector("span:last-child").textContent = txt;
+    if (j.status === "done" && j.result && j.result.unresolved && j.result.unresolved.length) {
+      el.title = "Unresolved: " + j.result.unresolved.join(", ");
+    }
+  }
+  syncLayout();
+  const busy = (k) => (state.jobs[k] || {}).status === "running";
+  $("btn-scan").disabled = busy("scan");
+  $("btn-odds").disabled = busy("odds") || busy("scan");
+  $("btn-stats").disabled = busy("stats");
+}
+
+/* ---------------------------- data loading ------------------------------ */
+async function loadMatches() {
+  const data = await api(`/api/matches?form_n=${state.formN}`);
+  state.rows = data.matches;
+  state.raw = data.raw;
+  state.rawById = new Map(data.raw.map((m) => [m.match_id, m]));
+  pruneSelection();
+  initLines();
+  maybeApplyDefaultSelection();
+  render();
+}
+
+async function loadColumns() {
+  const data = await api("/api/columns");
+  state.groups = data.groups;
+  state.columns = data.groups.flatMap((g) => g.columns);
+  buildQuickSets();
+}
+
+async function loadSelection() {
+  const data = await api("/api/selections");
+  const sel = data.selection || {};
+  // Copy format starts on the LLM format; an explicit previous choice wins
+  // (localStorage) — the server copy is only kept for the API.
+  let stored = null;
+  try { stored = localStorage.getItem("ts.format"); } catch (e) {}
+  state.format = stored || "llm";
+  if (!["llm", "tsv", "md", "md_block", "json"].includes(state.format)) state.format = "llm";
+  $("format").value = state.format;
+  try { state.selectionTouched = localStorage.getItem("ts.touched") === "1"; } catch (e) {}
+  state.selection = new Map();
+  for (const [mid, cols] of Object.entries(sel.cells || {})) {
+    if (cols && cols.length) state.selection.set(mid, new Set(cols));
+  }
+  // a selection saved earlier beats the default preset
+  if (state.selection.size > 0) state.selectionTouched = true;
+  pruneSelection();
+}
+
+async function loadJobs() {
+  const data = await api("/api/jobs");
+  state.jobs = data.jobs;
+  renderJobs();
+}
+
+function openStream() {
+  const es = new EventSource("/api/scan/stream");
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "snapshot") {
+      state.jobs = msg.jobs;
+      renderJobs();
+      return;
+    }
+    if (msg.type === "job") {
+      const j = msg.job;
+      const prev = state.jobs[j.kind];
+      state.jobs[j.kind] = j;
+      renderJobs();
+      if (j.status === "done" && (!prev || prev.status !== "done")) {
+        if (j.kind === "scan" || j.kind === "stats") loadMatches().catch(() => {});
+        if (j.kind === "odds") loadMatches().catch(() => {});
+        if (j.kind === "scan" && j.result && j.result.matches === 0)
+          toast("Scan finished — no matches found", true);
+        if (j.kind === "odds" && j.result) {
+          const f = j.result.fetched || 0, fails = (j.result.failed || []).length;
+          toast(`Odds: ${f} fetched${fails ? `, ${fails} failed` : ""}`);
+        }
+        if (j.kind === "stats" && j.result && j.result.unresolved && j.result.unresolved.length)
+          toast("Unresolved players: " + j.result.unresolved.join(", "), true);
+      }
+      if (j.status === "error") toast(`${j.kind} failed: ${j.message}`, true);
+    }
+  };
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+/* ---------------------------- actions ---------------------------------- */
+async function post(path, body, okMsg) {
+  try {
+    await api(path, {method: "POST", body: JSON.stringify(body || {})});
+    if (okMsg) toast(okMsg);
+  } catch (e) {
+    if (String(e).includes("409")) toast("Job already running", true);
+    else toast(e.message || String(e), true);
+  }
+  await loadJobs().catch(() => {});
+}
+
+$("btn-scan").addEventListener("click", () =>
+  post("/api/scan", {stop_at_night_gap: false, include_live: true}, "Scanning Winamax (all days)…"));
+
+$("btn-odds").addEventListener("click", () => {
+  const pending = activeRows().filter((r) => !r.has_odds && !r.live);
+  if (!pending.length) {
+    toast("No pending match among the selected lines", true);
+    return;
+  }
+  post("/api/odds", {match_ids: pending.map((r) => r.match_id)},
+       `Fetching odds for ${pending.length} match${pending.length === 1 ? "" : "es"}…`);
+});
+
+$("btn-stats").addEventListener("click", () =>
+  post("/api/stats", {}, "Fetching player stats…"));
+
+$("search").addEventListener("input", (e) => { state.search = e.target.value; renderBody(); updateCount(); });
+$("hide-live").addEventListener("change", (e) => { state.hideLive = e.target.checked; renderBody(); updateCount(); });
+$("form-n").addEventListener("change", (e) => {
+  state.formN = parseInt(e.target.value, 10);
+  loadMatches().catch((e2) => toast(e2.message, true));
+});
+$("format").addEventListener("change", (e) => {
+  state.format = e.target.value;
+  try { localStorage.setItem("ts.format", state.format); } catch (err) {}
+  persistSelection();
+});
+
+$("btn-none").addEventListener("click", () => {
+  markTouched();
+  state.selection = new Map();
+  refreshCells();
+  updateCount(); persistSelection();
+});
+
+for (const btn of document.querySelectorAll(".quick")) {
+  btn.addEventListener("click", () => {
+    const ids = quickCols(btn.dataset.quick);
+    if (!ids.length) return;
+    if (!activeRows().length) { toast("No match selected — tick a line or a day first", true); return; }
+    const on = quickState(btn.dataset.quick) !== "all";   // toggle
+    markTouched();
+    selectCols(ids, on);
+    refreshCells();
+    updateCount(); persistSelection();
+  });
+}
+
+$("btn-copy").addEventListener("click", async () => {
+  const cells = exportCells();
+  if (!Object.keys(cells).length) {
+    toast(state.lines.size ? "No box checked for the selected matches"
+                           : "No match selected — tick a line or a day first", true);
+    return;
+  }
+  try {
+    const data = await api("/api/export", {
+      method: "POST",
+      body: JSON.stringify({cells, format: state.format, form_n: state.formN}),
+    });
+    if (!data.text) { toast("Selection produced no output", true); return; }
+    const ok = await copyText(data.text);
+    if (ok) toast(`Copied ${data.rows} matches × ${data.columns} columns (${data.chars} chars)`);
+    else toast("Clipboard blocked — select the table manually", true);
+  } catch (e) {
+    toast("Export failed: " + e.message, true);
+  }
+});
+
+$("btn-copy-list").addEventListener("click", async () => {
+  const rows = activeRows();
+  if (!rows.length) { toast("No match selected — tick a line or a day first", true); return; }
+  const text = rows.map((r) => `${r.player1} vs ${r.player2}`).join("\n");
+  const ok = await copyText(text);
+  if (ok) toast(`Copied ${rows.length} match${rows.length === 1 ? "" : "es"} as 'A vs B' lines`);
+  else toast("Clipboard blocked", true);
+});
+
+/* ---------------------------- boot -------------------------------------- */
+(async function boot() {
+  try {
+    await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches()]);
+    state.loadedOnce = true;
+    maybeApplyDefaultSelection();
+    render();
+  } catch (e) {
+    $("empty").hidden = false;
+    $("empty-title").textContent = "Cannot reach the API";
+    $("empty-text").textContent = e.message || String(e);
+  }
+  window.addEventListener("resize", syncLayout);
+  openStream();
+})();
+</script>
+</body>
+</html>
