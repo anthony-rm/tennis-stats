@@ -75,6 +75,25 @@ def data_dir() -> Path:
     return bundle_path() / "data"
 
 
+def setup_tls() -> None:
+    """Point OpenSSL at the bundled CA store.
+
+    A PyInstaller bundle inherits the *build machine's* compiled-in OpenSSL
+    paths, which do not exist on the friend's Mac, so plain ``urllib`` HTTPS
+    (the update check) fails with CERTIFICATE_VERIFY_FAILED unless we say where
+    the CA bundle is. ``requests`` is unaffected (it uses certifi directly).
+    """
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover - always present in the bundle
+        return
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "certifi" / "cacert.pem"
+    ca = bundled if bundled.exists() else Path(certifi.where())
+    if ca.exists():
+        os.environ.setdefault("SSL_CERT_FILE", str(ca))
+        os.environ.setdefault("SSL_CERT_DIR", str(ca.parent))
+
+
 def setup_logging() -> None:
     target = data_dir() / "logs"
     target.mkdir(parents=True, exist_ok=True)
@@ -191,15 +210,19 @@ def asset_name(ver: str) -> str:
     return f"TennisStats-{ver}-{platform.machine()}.zip"
 
 
-def latest_release(current: str) -> dict | None:
-    """Newer release info (version, zip url, page) or None."""
+def fetch_latest(current: str) -> dict:
     req = urllib.request.Request(
         API_LATEST,
         headers={"Accept": "application/vnd.github+json", "User-Agent": f"TennisStats/{current}"},
     )
+    with urllib.request.urlopen(req, timeout=20) as res:
+        return json.load(res)
+
+
+def latest_release(current: str) -> dict | None:
+    """Newer release info (version, zip url, page) or None."""
     try:
-        with urllib.request.urlopen(req, timeout=20) as res:
-            data = json.load(res)
+        data = fetch_latest(current)
     except Exception:
         log.warning("update check failed", exc_info=True)
         return None
@@ -425,7 +448,27 @@ def run_headless(dashboard: Dashboard) -> int:
     return 0
 
 
+def cli_check_updates() -> int:
+    """``--check-updates``: print the raw release feed result and exit."""
+    try:
+        data = fetch_latest(version())
+    except Exception as exc:  # noqa: BLE001 - printed for diagnostics
+        print(json.dumps({"current": version(), "error": f"{type(exc).__name__}: {exc}"}))
+        return 1
+    print(json.dumps({
+        "current": version(),
+        "tag": data.get("tag_name"),
+        "assets": [a.get("name") for a in data.get("assets", [])],
+        "update": latest_release(version()),
+    }, indent=2))
+    return 0
+
+
 def main() -> int:
+    setup_tls()
+    if "--check-updates" in sys.argv[1:]:
+        return cli_check_updates()
+
     os.environ.setdefault("TENNIS_STATS_DATA_DIR", str(data_dir()))
     setup_logging()
     log.info("%s %s starting (%s, frozen=%s)", APP_NAME, version(), platform.machine(), frozen())

@@ -58,6 +58,16 @@ To keep the friend's Mac and an Intel Mac both supported, each release publishes
 one archive per architecture (`-arm64`, and `-x86_64` when that build is
 enabled); the updater downloads the one matching the machine it runs on.
 
+If an update never shows up, ask for the output of
+
+```bash
+"/Applications/Tennis Stats.app/Contents/MacOS/Tennis Stats" --check-updates
+```
+
+which prints the release feed (tag, assets, whether an update was selected).
+The launcher log is at
+`~/Library/Application Support/TennisStats/logs/launcher.log`.
+
 ## Quick start (development)
 
 ```bash
