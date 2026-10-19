@@ -801,9 +801,8 @@ function matchFragment(r, specs) {
   if (r.has_odds) badges.push('<span class="badge odds">odds</span>');
   const st = r.stats_status || {};
   if (st.p1 === "ok" && st.p2 === "ok") badges.push('<span class="badge ta-ok">TA</span>');
-  else if (st.p1 === "unresolved" || st.p2 === "unresolved" ||
-           st.p1 === "missing" || st.p2 === "missing")
-    badges.push('<span class="badge ta-warn" title="Tennis Abstract data missing for at least one player — press Fetch stats">TA?</span>');
+  else if (["missing", "unresolved", "error"].some((s) => st.p1 === s || st.p2 === s))
+    badges.push('<span class="badge ta-warn" title="Tennis Abstract data missing for at least one player (not fetched yet, fetch failed, or not on TA) — press Fetch stats">TA?</span>');
   const line = document.createElement("div");
   line.className = "match-line";
   const rowCb = document.createElement("input");

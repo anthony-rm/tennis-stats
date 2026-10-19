@@ -5,8 +5,8 @@ Schema notes (PLAN.md §5):
     OddsJSON from the odds pass);
   * stats.player_key is the *player name* (not the TA id) because match rows
     reference players by name and unresolved players have no TA id — the
-    payload_json still carries player_id / unresolved / tried (documented
-    deviation, see README).
+    payload_json still carries player_id / unresolved / tried / error
+    (documented deviation, see README).
 """
 from __future__ import annotations
 

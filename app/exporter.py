@@ -34,8 +34,8 @@ _GUIDE = (
     '- every match is a block: "## N. P1 vs P2" then one field per line, "- Label: value";',
     '- fields holding both players are written as "<player> <value>, <player> <value>"'
     " (first player = first named in the match line);",
-    '- "—" means not available (stats not fetched, player unresolved, or absent'
-    " on Tennis Abstract);",
+    '- "—" means not available (stats not fetched, fetch failed, player'
+    " unresolved, or absent on Tennis Abstract);",
     "- section headings (###) are the dashboard's column groups.",
 )
 

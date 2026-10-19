@@ -107,7 +107,9 @@ jobs with live progress via SSE):
 * **↻ Refresh odds** — re-fetch the odds of every match, *including the ones
   already shown*, because the odds move during the day;
 * **Fetch stats** — every player of the list still missing Tennis Abstract
-  data (already stored players are skipped, stored fetch errors are retried);
+  data (already stored players are skipped, stored fetch errors are retried;
+  three consecutive network failures stop the pass with an error instead of
+  recording every remaining player as absent);
 * **Clear data** — deletes every downloaded match / odd / player stat plus
   the cached player pages on disk (confirmed first, disabled while a job
   runs); the selection and copy format are kept, and the grid comes back
@@ -266,7 +268,8 @@ tests verify it parses (`node --check`) and is up to date.
 * The grid shows **two rows per match** (top = first player, bottom = second):
   pair values are split instead of being joined with `P1 | P2`; the copy
   formats keep the `P1 | P2` convention for rectangular exports.
-* `—` = unknown (stats not fetched, player unresolved, table absent on TA).
+* `—` = unknown (stats not fetched, fetch failed, player unresolved, table
+  absent on TA).
 * **Time & day**: Winamax's cards hold **Europe/Paris** kick-offs and day
   sections (`demain`, `mar.`, …) — the official calendar of a match.
   `a.start` is converted to **the machine's time zone** for the row summary,
@@ -299,8 +302,9 @@ tests verify it parses (`node --check`) and is up to date.
   (never `1er set - …` or `Nombre de jeux de <player>` variants).
 * Group G (H2H) values come from **P1's** head-to-head table; `never` = both
   players are known and have not met.
-* Unresolved Tennis Abstract ids are flagged in the row (`TA?` badge) instead
-  of silently showing empty data.
+* Tennis Abstract gaps are flagged in the row (`TA?` badge) — unresolved ids,
+  players not fetched yet and stored fetch failures — instead of silently
+  showing empty data.
 
 ### Export semantics
 
@@ -417,9 +421,18 @@ launchctl load ~/Library/LaunchAgents/com.tennis.stats.scan.plist
   during the pass, not at the end. The viewport (both scroll axes) and the
   selection survive those mid-pass reloads.
 * **Tennis Abstract politeness**: 1.6 s between players, 24 h cache in
-  `data/cache/<date>/`. Name → id failures (e.g. `Zhang Zhizhen`
-  is not in TA's index) surface as the `TA?` badge with the tried variants
-  stored in the payload.
+  `data/cache/<date>/`. Name → id resolution (`core/tennisabstract.py`)
+  retries every probe and only trusts *answers*: candidate variants (accents,
+  particles, `Jr`/`Sr` suffixes) that all come back 404 fall back to TA's own
+  search list (`mwplayerlist.js`, at most one fetch per run), so an id that
+  differs from the display name still resolves (`Thiago Tirante` →
+  `ThiagoAgustinTirante`, `Martin Damm Jr` → `MartinDamm`). Only after TA
+  answered and had nothing does a player become `unresolved` (e.g.
+  `Zhang Zhizhen`), with the tried variants stored in the payload and the
+  `TA?` badge on the row. A run where TA never answers (timeouts, 5xx,
+  403/429) is a retriable `error` instead — never `unresolved` — and three
+  consecutive such failures stop the pass with a job error, so a network
+  outage reports itself instead of blanking every player for the day.
 * Schema changes to `data/tennis_stats.db` need a migration — tables are
   created with `IF NOT EXISTS` only.
 

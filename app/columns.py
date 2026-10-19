@@ -6,7 +6,8 @@ UI, and the key used by app/exporter.py when copying the selection.
 Cell conventions:
   * per-player stat columns (`pair=True`) render both players as "P1 | P2"
     (row order = the match row's player1 | player2);
-  * "—" means unknown (stats not fetched / player unresolved / table absent);
+  * "—" means unknown (stats not fetched / fetch failed / player unresolved
+    / table absent);
   * time & day: Winamax speaks Europe/Paris (see OFFICIAL_TZ) — a.start is
     converted to the machine's clock (start_display), while a.day groups a
     match by its official Winamax day (match_date / day_label), never by the
@@ -282,6 +283,9 @@ class PlayerView:
     def __init__(self, payload: Optional[dict]) -> None:
         self.payload = payload or {}
         self.unresolved = bool(self.payload.get("unresolved")) or not self.payload
+        # a stored fetch fault (network/parse): retriable, distinct from
+        # "unresolved", which TA confirmed as absent
+        self.error = bool(self.payload.get("error"))
         self.profile: dict = self.payload.get("profile") or {}
         self.tables: dict = dict(self.payload.get("tables") or {})
 
@@ -1003,6 +1007,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
     for side, view in (("p1", v1), ("p2", v2)):
         if not view.payload:
             status[side] = "missing"
+        elif view.error:
+            status[side] = "error"          # fetch fault — retried next pass
         elif view.unresolved:
             status[side] = "unresolved"
         elif not view.available:

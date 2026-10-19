@@ -9,7 +9,15 @@ Fixes vs. the original scraper (PLAN.md §2.2):
   * ALL tables in the fragment are parsed (18 real tables + the id-less nav table
     is skipped), not just 4;
   * name -> id resolution with 404 fallback variants (accents, hyphens,
-    particles) and an explicit unresolved result instead of silent empty data;
+    particles, generational suffixes) and an explicit unresolved result
+    instead of silent empty data;
+  * resolution only trusts *answers*: probes are retried like `_get` does, and
+    a name whose probes all died raises `ResolutionNetworkError` instead of
+    being recorded as "not on the site" — the 2026-10-19 network blip (broken
+    VPN/DoH path) cost 8 famous players their stats that way;
+  * last-resort lookup through TA's own autocomplete list (`mwplayerlist.js`),
+    which resolves ids spelled differently than the display name
+    ("Thiago Tirante" -> `ThiagoAgustinTirante`);
   * per-player, per-day JSON cache (24 h TTL) — players repeat day to day.
 
 Data shapes
@@ -59,6 +67,22 @@ PARTICLE_TOKENS = {
     "van", "von", "ter", "ten", "bin", "al", "el", "st", "st.",
 }
 
+# generational suffixes: "Martin Damm Jr" is "Martin Damm" on TA
+SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv"}
+
+# probes retry exactly like _get() so one dead request never decides a name
+PROBE_ATTEMPTS = 3
+PROBE_BACKOFF = (1.0, 3.0)
+PROBE_TIMEOUT = 20
+
+# throttling/blocking is silence, not an answer about the player
+THROTTLED_STATUSES = {403, 429}
+
+# TA's own autocomplete source (~1.7 MB, both tours), reached only when id
+# probing found nothing and memoised in-process for the length of a run
+PLAYERLIST_URL = "https://www.tennisabstract.com/mwplayerlist.js"
+PLAYERLIST_TTL_HOURS = 24.0
+
 CACHE_TTL_HOURS = 24.0
 
 
@@ -69,6 +93,25 @@ class UnresolvedPlayer(Exception):
         super().__init__(f"unresolved Tennis Abstract id for {name!r} (tried: {tried})")
         self.name = name
         self.tried = tried
+
+
+class ResolutionNetworkError(Exception):
+    """Tennis Abstract gave no usable answer while resolving a name.
+
+    Deliberately distinct from `UnresolvedPlayer`: this says nothing about the
+    player — the request died (DNS/VPN outage, 5xx) or TA's own player list
+    could not be read. Callers must store it as a retriable `error`, never as
+    a permanent `unresolved`, or a five-minute network blip blanks a player
+    until the stored row is cleared.
+    """
+
+    def __init__(self, name: str, tried: list[str], reason: str) -> None:
+        super().__init__(
+            f"could not reach Tennis Abstract for {name!r} (tried: {tried}): {reason}"
+        )
+        self.name = name
+        self.tried = tried
+        self.reason = reason
 
 
 # ---------------------------------------------------------------- names ----
@@ -97,29 +140,173 @@ def id_candidates(name: str) -> list[str]:
     if tokens:
         add(re.sub(r"\s+", "", " ".join(tokens).title()))          # drop particles
         add(re.sub(r"[^A-Za-z0-9]", "", " ".join(tokens).title()))
+    suffix_free = [t for t in tokens if t.lower() not in SUFFIX_TOKENS]
+    if len(suffix_free) < len(tokens):                             # "Martin Damm Jr"
+        add(re.sub(r"\s+", "", " ".join(suffix_free).title()))     #   -> MartinDamm
+        add(re.sub(r"[^A-Za-z0-9]", "", " ".join(suffix_free).title()))
     add(re.sub(r"\s+", "", _strip_accents(name.split(",")[0]).title()))  # "Last, First"
     return candidates
 
 
+def _probe(
+    url: str,
+    session: Optional[requests.Session] = None,
+    attempts: int = PROBE_ATTEMPTS,
+    timeout: int = PROBE_TIMEOUT,
+    backoff: tuple[float, ...] = PROBE_BACKOFF,
+) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    """GET `url`, retrying network errors, 5xx and throttling like `_get` does.
+
+    Returns `(status, body, reason)`:
+      * a status code plus the body — an *answer*, so a 404 really is a
+        non-existent id;
+      * `(None, None, reason)` only when every attempt was lost or throttled —
+        ambiguous, and never to be read as "the player is not on the site".
+    """
+    sess = session or requests.Session()
+    reason = "no attempt ran"
+    for attempt in range(attempts):
+        try:
+            resp = sess.get(url, headers=HEADERS, timeout=timeout)
+        except requests.RequestException as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        else:
+            if resp.status_code < 500 and resp.status_code not in THROTTLED_STATUSES:
+                return resp.status_code, resp.text, None
+            reason = f"HTTP {resp.status_code}"   # throttled/blocked says nothing
+        if attempt < attempts - 1:
+            time.sleep(backoff[min(attempt, len(backoff) - 1)])
+    return None, None, reason
+
+
+_PLAYERLIST_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def load_playerlist(
+    session: Optional[requests.Session] = None,
+    ttl_hours: float = PLAYERLIST_TTL_HOURS,
+) -> list[str]:
+    """TA's own autocomplete list (`mwplayerlist.js`): every player it knows.
+
+    One file covers both tours and is the index behind TA's search box, which
+    is why it can resolve an id that differs from the display name. ~1.7 MB,
+    memoised in-process — it is only reached when id probing found nothing, so
+    a run downloads it at most once. Raises `RequestException` (network/HTTP)
+    or `ValueError` (format change) when the list cannot be used.
+    """
+    now = time.monotonic()
+    hit = _PLAYERLIST_CACHE.get(PLAYERLIST_URL)
+    if hit and now - hit[0] <= ttl_hours * 3600:
+        return hit[1]
+    text = _get(PLAYERLIST_URL, session=session).text
+    m = re.match(r"\s*var\s+playerlist\s*=\s*\[(.*)\]\s*;?\s*$", text, re.DOTALL)
+    if not m:
+        raise ValueError("playerlist variable not found in mwplayerlist.js")
+    names = [n for n in json.loads(f"[{m.group(1)}]") if isinstance(n, str)]
+    _PLAYERLIST_CACHE[PLAYERLIST_URL] = (now, names)
+    return names
+
+
+def _name_tokens(text: str) -> frozenset[str]:
+    """Accent-free, case-folded tokens, minus the '(M) '/'(W) ' prefix, any
+    particle and any generational suffix — so both sides of a name comparison
+    are on equal terms ('Thiago Agustin Tirante' vs 'Thiago Tirante')."""
+    cleaned = re.sub(r"^\([MW]\)\s*", "", text.strip())
+    return frozenset(
+        t for t in _strip_accents(cleaned).casefold().split()
+        if t and t not in PARTICLE_TOKENS and t not in SUFFIX_TOKENS
+    )
+
+
+def match_player_name(name: str, entries: Iterable[str]) -> Optional[str]:
+    """Find `name` in TA's list: `'Thiago Tirante'` -> `'(M) Thiago Agustin Tirante'`.
+
+    An exact token match wins; failing that, a *unique* entry containing every
+    query token plus at most two more. Ambiguous or absent returns None —
+    stats for the wrong player are worse than no stats.
+    """
+    query = _name_tokens(name)
+    if not query:
+        return None
+    exact: list[str] = []
+    partial: list[str] = []
+    for entry in entries:
+        tokens = _name_tokens(entry)
+        if not tokens:
+            continue
+        if tokens == query:
+            exact.append(entry)
+        elif len(tokens) <= len(query) + 2 and query <= tokens:
+            partial.append(entry)
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    return partial[0] if len(partial) == 1 else None
+
+
+def _canonical_id(
+    name: str, session: Optional[requests.Session] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """`(id, reason)` derived from TA's player list.
+
+    `reason` is set only when the list itself could not be read — ambiguous,
+    so the caller reports a network error instead of "player absent".
+    """
+    try:
+        entries = load_playerlist(session=session)
+    except (requests.RequestException, ValueError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    display = match_player_name(name, entries)
+    if not display:
+        return None, None
+    return player_name_to_id(re.sub(r"^\([MW]\)\s*", "", display)), None
+
+
 def resolve_player(name: str, session: Optional[requests.Session] = None) -> tuple[Optional[str], list[str]]:
-    """Return (player_id | None, candidates_tried). 404-safe: wrong forms cost one GET."""
+    """Return (player_id | None, candidates_tried).
+
+    Only an *answer* counts as evidence: probes are retried, throttling counts
+    as silence, and when TA never answers (or its player list cannot be read)
+    `ResolutionNetworkError` is raised rather than reporting the player as
+    absent. `None` therefore means "TA looked and did not have this name".
+    """
     sess = session or requests.Session()
     tried: list[str] = []
+    answered = 0
+    reason = "no candidate id"
     for candidate in id_candidates(name):
         tried.append(candidate)
-        try:
-            resp = sess.get(JS_FRAGS.format(player_id=candidate), headers=HEADERS, timeout=20)
-        except requests.RequestException:
-            continue
-        if resp.status_code == 200 and "player_frag" in resp.text:
+        status, body, why = _probe(JS_FRAGS.format(player_id=candidate), session=sess)
+        if status is None:
+            reason = why or "no answer"
+            continue                        # ambiguous — never "player absent"
+        answered += 1
+        if status == 200 and body and "player_frag" in body:
             return candidate, tried
+    if not answered:
+        raise ResolutionNetworkError(name, tried, reason)
+
+    # last resort: TA's own search index, for ids spelled differently than the
+    # name (a middle name: Thiago Tirante -> ThiagoAgustinTirante)
+    canonical, why = _canonical_id(name, session=sess)
+    if why:
+        raise ResolutionNetworkError(name, tried, why)
+    if canonical and canonical not in tried:
+        tried.append(canonical)
+        status, body, why = _probe(JS_FRAGS.format(player_id=canonical), session=sess)
+        if status is None:
+            raise ResolutionNetworkError(name, tried, why or "no answer")
+        if status == 200 and body and "player_frag" in body:
+            return canonical, tried
     return None, tried
 
 
 # ------------------------------------------------------------ fetching -----
 def _get(url: str, session: Optional[requests.Session] = None, timeout: int = 30) -> requests.Response:
-    """GET with polite retry/backoff (3 attempts, 1s/3s) on network errors and
-    5xx. 4xx (e.g. a 404 for an unknown player id) is never retried."""
+    """GET with polite retry/backoff (3 attempts, 1s/3s) on network errors, 5xx
+    and throttling (403/429 — silence, worth waiting out). Any other 4xx
+    (e.g. a 404 for an unknown player id) is never retried: it is an answer."""
     sess = session or requests.Session()
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -129,7 +316,7 @@ def _get(url: str, session: Optional[requests.Session] = None, timeout: int = 30
         except requests.RequestException as exc:
             last_exc = exc
         else:
-            if resp.status_code < 500:
+            if resp.status_code < 500 and resp.status_code not in THROTTLED_STATUSES:
                 resp.raise_for_status()      # 4xx raises here, outside the retry
                 return resp
             last_exc = requests.HTTPError(f"HTTP {resp.status_code} for {url}", response=resp)
@@ -245,7 +432,12 @@ def fetch_player(
     name: str,
     session: Optional[requests.Session] = None,
 ) -> dict:
-    """Resolve `name` and fetch profile + every table. Raises UnresolvedPlayer."""
+    """Resolve `name` and fetch profile + every table.
+
+    Raises `UnresolvedPlayer` when TA answered and had no such name, or
+    `ResolutionNetworkError` when TA could not be reached — a retriable fault
+    that must not be recorded as an absent player.
+    """
     player_id, tried = resolve_player(name, session=session)
     if player_id is None:
         raise UnresolvedPlayer(name, tried)
@@ -305,7 +497,13 @@ def get_player(
     ttl_hours: float = CACHE_TTL_HOURS,
     session: Optional[requests.Session] = None,
 ) -> dict:
-    """Cache-first fetch. Returns payload with `"unresolved": True` when no id fits."""
+    """Cache-first fetch.
+
+    Returns a payload with `"unresolved": True` when TA *answered* and had no
+    such name. `ResolutionNetworkError` deliberately propagates: the caller
+    stores it as a retriable `error`, so a network blip never becomes a
+    permanent "no data" row.
+    """
     cached = load_cached_by_name(cache_dir, name, ttl_hours)
     if cached:
         return cached

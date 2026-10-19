@@ -175,6 +175,86 @@ def test_stats_retries_stored_errors_but_keeps_unresolved(tmp_path, monkeypatch,
     assert job["result"] == {"stored": 1, "unresolved": []}
 
 
+def _raising_ta(exc_factory):
+    """A get_player that raises `exc_factory(name)` — the outage simulation."""
+    def get_player(name, cache_dir, session=None):
+        raise exc_factory(name)
+    return get_player
+
+
+def test_stats_stores_network_faults_as_retriable_errors(tmp_path, monkeypatch, store):
+    from core.tennisabstract import ResolutionNetworkError
+    monkeypatch.setattr(
+        jobs_mod.ta, "get_player",
+        _raising_ta(lambda n: ResolutionNetworkError(n, [n], "ConnectTimeout: dns down")))
+    store.upsert_matches([_match("1")])        # two players, below the abort limit
+    jm = jobs_mod.JobManager(store, tmp_path / "cache")
+
+    job, _ = _run(jm, lambda: jm.start_stats())
+
+    assert job["status"] == "done"
+    assert job["result"] == {"stored": 2, "unresolved": []}
+    rows = store.get_stats()
+    assert sorted(rows) == ["Iga Swiatek", "Novak Djokovic"]
+    for row in rows.values():
+        assert "ConnectTimeout" in row["error"]
+        assert not row.get("unresolved"), "a dead request is never 'player absent'"
+        assert row["tried"] == [row["player_name"]]
+
+    # ... so the next pass picks them up again (they are errors, not unresolved)
+    fetched: list[str] = []
+    monkeypatch.setattr(jobs_mod.ta, "get_player", _fake_ta(fetched))
+    job2, _ = _run(jm, lambda: jm.start_stats())
+    assert sorted(fetched) == ["Iga Swiatek", "Novak Djokovic"]
+    assert job2["result"] == {"stored": 2, "unresolved": []}
+
+
+def test_stats_pass_stops_after_repeated_network_failures(tmp_path, monkeypatch, store):
+    from core.tennisabstract import ResolutionNetworkError
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        jobs_mod.ta, "get_player",
+        _raising_ta(lambda n: (fetched.append(n),
+                               ResolutionNetworkError(n, [n], "read timed out"))[1]))
+    store.upsert_matches([_match("1"), _match("2", p1="Alexander Zverev",
+                                               p2="Daniil Medvedev")])   # four players
+    jm = jobs_mod.JobManager(store, tmp_path / "cache")
+
+    job, _ = _run(jm, lambda: jm.start_stats())
+
+    assert job["status"] == "error"
+    assert "Tennis Abstract unreachable" in job["message"]
+    # the pass gives up instead of burning a timeout on every remaining player
+    assert len(fetched) == jobs_mod.NETWORK_ABORT_AFTER
+    assert job["result"] == {"stored": jobs_mod.NETWORK_ABORT_AFTER, "unresolved": []}
+    rows = store.get_stats()
+    assert len(rows) == jobs_mod.NETWORK_ABORT_AFTER
+    assert all("error" in r and not r.get("unresolved") for r in rows.values())
+
+
+def test_stats_network_counter_resets_on_a_successful_fetch(tmp_path, monkeypatch, store):
+    from core.tennisabstract import ResolutionNetworkError
+    calls = {"n": 0}
+
+    def get_player(name, cache_dir, session=None):
+        calls["n"] += 1
+        if calls["n"] in (1, 2, 4):            # fail, fail, ok, fail
+            raise ResolutionNetworkError(name, [name], "blip")
+        return {"player_name": name, "player_id": 7, "profile": {}, "tables": {}}
+
+    monkeypatch.setattr(jobs_mod.ta, "get_player", get_player)
+    store.upsert_matches([_match("1"), _match("2", p1="Alexander Zverev",
+                                               p2="Daniil Medvedev")])
+    jm = jobs_mod.JobManager(store, tmp_path / "cache")
+
+    job, _ = _run(jm, lambda: jm.start_stats())
+
+    assert job["status"] == "done"             # the counter restarted on success
+    rows = store.get_stats()
+    assert len(rows) == 4
+    assert sum(1 for r in rows.values() if "error" in r) == 3
+
+
 # ---------------------------------------------------------------- version ---
 def test_app_version_reads_the_version_file():
     version = app_version()

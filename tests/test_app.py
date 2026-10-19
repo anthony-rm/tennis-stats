@@ -262,6 +262,18 @@ def test_unresolved_and_missing_players():
     assert out2["values"]["a.odds"] == "1.5 | 2.5"
 
 
+def test_fetch_fault_is_error_status_not_unresolved():
+    """A stored fetch failure (network) is retriable: it renders as `error`,
+    never as `unresolved`, which is reserved for names TA does not have."""
+    failed = {"player_name": "Marin Cilic", "player_id": None,
+              "error": "ConnectTimeout: dns down", "profile": {}, "tables": {}}
+    stats = {"Novak Djokovic": DJOKOVIC, "Marin Cilic": failed}
+    m = dict(MATCH, player2="Marin Cilic")
+    out = col.compute_values(m, stats)
+    assert out["stats_status"] == {"p1": "ok", "p2": "error"}
+    assert out["values"]["b.rank"] == "8 | —"
+
+
 def test_live_and_day_labels():
     m = dict(MATCH, live=1, start_local=None)
     v = col.compute_values(m, {})["values"]

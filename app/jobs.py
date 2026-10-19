@@ -21,6 +21,12 @@ from core.winamax import WinamaxBlocked, WinamaxSession
 
 KINDS = ("scan", "odds", "stats")
 
+# how many consecutive Tennis Abstract/network failures end the stats pass —
+# every remaining player would fail the same way, so the job reports the fault
+# instead of spending a timeout per player (and nothing is recorded as
+# "player absent")
+NETWORK_ABORT_AFTER = 3
+
 
 class JobBusy(RuntimeError):
     pass
@@ -236,20 +242,34 @@ class JobManager:
                          finished_at=_now(),
                          result={"stored": tally["stored"], "unresolved": unresolved})
         except Exception as exc:
-            self._fail(kind, exc)
+            await asyncio.sleep(0)     # store the rows written before the stop
+            self._fail(kind, exc, partial={"stored": tally["stored"],
+                                           "unresolved": tally["unresolved"]})
 
     def _fetch_all(self, names: list[str], progress) -> None:
         session = requests.Session()
+        consecutive_net = 0
         for i, name in enumerate(names):
+            abort: Optional[Exception] = None
             try:
                 payload = ta.get_player(name, self.cache_dir, session=session)
-            except Exception as exc:  # network blip: record, keep going
-                payload = {
-                    "player_name": name, "player_id": None,
-                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                    "profile": {}, "tables": {}, "error": str(exc),
-                }
+            except (ta.ResolutionNetworkError, requests.RequestException) as exc:
+                # TA unreachable: a retriable `error`, and after
+                # NETWORK_ABORT_AFTER in a row the whole pass stops
+                payload = _error_payload(name, exc)
+                consecutive_net += 1
+                if consecutive_net >= NETWORK_ABORT_AFTER:
+                    abort = exc
+            except Exception as exc:  # other fault: record, keep going
+                payload = _error_payload(name, exc)
+            else:
+                consecutive_net = 0
             progress(i + 1, name, payload)
+            if abort is not None:
+                raise RuntimeError(
+                    f"Tennis Abstract unreachable — stats pass stopped after "
+                    f"{consecutive_net} consecutive failures ({abort})"
+                ) from abort
             if i < len(names) - 1:
                 time.sleep(1.6)
 
@@ -269,6 +289,21 @@ class JobManager:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+def _error_payload(name: str, exc: Exception) -> dict:
+    """What a failed fetch stores: `error` (retried by the next pass), never
+    `unresolved` — that flag is reserved for names Tennis Abstract answered
+    about and did not have, so a network blip cannot blank a player for good."""
+    payload = {
+        "player_name": name, "player_id": None,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "profile": {}, "tables": {}, "error": str(exc),
+    }
+    tried = getattr(exc, "tried", None)
+    if tried:                               # id variants probed before dying
+        payload["tried"] = list(tried)
+    return payload
 
 
 def _now() -> str:
