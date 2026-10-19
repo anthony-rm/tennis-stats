@@ -13,9 +13,16 @@ What it does
        opens the dashboard in the default browser;
     3. installs a menu-bar item: Open dashboard / Rescan / Check for updates /
        Quit;
-    4. polls the GitHub release feed and, when a newer tag exists, offers a
-       one-click update that downloads the matching zip, swaps the bundle in
-       place and relaunches.
+    4. polls the GitHub release feed and, when a newer tag exists, turns the
+       update entry into an **installer**: one click downloads the matching
+       zip, verifies it (SHA256 + code signature), swaps the bundle in place
+       and relaunches. The entry switches *action* together with its title —
+       a title-only change would make the click just re-run the check.
+
+``--check-updates`` prints the release-feed decision as JSON and exits;
+``--update`` performs the whole check + install + relaunch from the terminal.
+The release feed, the archive verification and the menu model live in
+``desktop/updater.py`` (imported here).
 
 Without PyObjC (e.g. a bare dev venv) it falls back to a plain foreground
 process: dashboard open, Ctrl-C to quit.
@@ -27,8 +34,8 @@ import logging
 import logging.handlers
 import os
 import platform
+import shutil
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -37,10 +44,12 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+from updater import (
+    CHECK_ACTION, UpdateError, check_release, set_update_entry, spawn_swap,
+    stage_update,
+)
+
 APP_NAME = "Tennis Stats"
-REPO_SLUG = "anthony-rm/tennis-stats"
-API_LATEST = f"https://api.github.com/repos/{REPO_SLUG}/releases/latest"
-RELEASE_PAGE = f"https://github.com/{REPO_SLUG}/releases/latest"
 PREFERRED_PORT = 8000
 UPDATE_INTERVAL = 6 * 3600          # re-check every six hours
 CHROME_APP = "/Applications/Google Chrome.app"
@@ -70,6 +79,11 @@ def version() -> str:
 
 
 def data_dir() -> Path:
+    """``TENNIS_STATS_DATA_DIR`` wins (set by run_local.sh / tests), otherwise
+    the app-support folder when frozen and ``<repo>/data`` in development."""
+    override = os.environ.get("TENNIS_STATS_DATA_DIR")
+    if override:
+        return Path(override)
     if frozen():
         return Path.home() / "Library" / "Application Support" / "TennisStats"
     return bundle_path() / "data"
@@ -195,120 +209,41 @@ def chrome_installed() -> bool:
     return Path(CHROME_APP).exists() or Path.home().joinpath("Applications/Google Chrome.app").exists()
 
 
-# -------------------------------------------------------------- update ----
-def parse_version(text: str) -> tuple[int, ...]:
-    parts: list[int] = []
-    for chunk in text.lstrip("vV").split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts) or (0,)
-
-
-def asset_name(ver: str) -> str:
-    return f"TennisStats-{ver}-{platform.machine()}.zip"
-
-
-def fetch_latest(current: str) -> dict:
-    req = urllib.request.Request(
-        API_LATEST,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": f"TennisStats/{current}"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as res:
-        return json.load(res)
-
-
-def latest_release(current: str) -> dict | None:
-    """Newer release info (version, zip url, page) or None.
-
-    ``TENNIS_STATS_NO_UPDATE=1`` turns the update check off entirely — used
-    when testing a local build next to the installed app so the temporary
-    build never overwrites itself.
-    """
-    if os.environ.get("TENNIS_STATS_NO_UPDATE"):
-        log.info("update check disabled (TENNIS_STATS_NO_UPDATE)")
-        return None
-    try:
-        data = fetch_latest(current)
-    except Exception:
-        log.warning("update check failed", exc_info=True)
-        return None
-    latest = str(data.get("tag_name") or "").lstrip("vV")
-    if not latest or parse_version(latest) <= parse_version(current):
-        log.info("up to date (%s, latest %s)", current, latest or "?")
-        return None
-    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets", [])}
-    url = assets.get(asset_name(latest)) or assets.get(f"TennisStats-{latest}.zip")
-    if not url:
-        log.warning("release %s has no asset for %s", latest, platform.machine())
-        return None
-    return {"version": latest, "url": url, "page": data.get("html_url") or RELEASE_PAGE}
-
-
-SWAP_SCRIPT = """#!/bin/sh
-# Wait for the running dashboard to exit, then replace the bundle and relaunch.
-DEST="$1"; NEW="$2"; PID="$3"
-i=0
-while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 240 ]; do sleep 0.25; i=$((i+1)); done
-sleep 0.5
-rm -rf "$DEST.old"
-mv "$DEST" "$DEST.old" 2>/dev/null || rm -rf "$DEST"
-if ditto "$NEW" "$DEST"; then
-    xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
-    rm -rf "$DEST.old"
-    open "$DEST" &
-else
-    rm -rf "$DEST"
-    mv "$DEST.old" "$DEST" 2>/dev/null
-fi
-"""
+def swap_log_path() -> Path:
+    target = data_dir() / "logs"
+    target.mkdir(parents=True, exist_ok=True)
+    return target / "update.log"
 
 
 def download_and_apply(info: dict) -> str | None:
-    """Download the release zip, swap the bundle, relaunch.
+    """Download, verify and stage the new build, then hand over to the swap.
 
-    Returns None on success (the caller should quit), or an error message.
+    Returns None when the update is on its way — the caller must then quit so
+    the script can replace the bundle — otherwise a message to show the user.
     """
     dest = bundle_path()
     if not frozen():
         return "this is a development checkout — update with git"
     if not os.access(dest.parent, os.W_OK):
         return f"cannot write to {dest.parent}"
-
     work = Path(tempfile.mkdtemp(prefix="tennisstats-update-"))
-    archive = work / "update.zip"
     try:
-        log.info("downloading %s", info["url"])
-        req = urllib.request.Request(info["url"], headers={"User-Agent": "TennisStats/updater"})
-        with urllib.request.urlopen(req, timeout=300) as res, archive.open("wb") as out:
-            while chunk := res.read(1 << 20):
-                out.write(chunk)
-        staging = work / "staging"
-        staging.mkdir()
-        subprocess.run(["ditto", "-x", "-k", str(archive), str(staging)], check=True)
-        apps = sorted(staging.glob("*.app"))
-        if not apps:
-            # zip may carry a top-level folder
-            apps = sorted(staging.glob("*/*.app"))
-        if not apps:
-            return "downloaded archive does not contain an app"
-        new_app = apps[0]
-        subprocess.run(["chmod", "-R", "u+w", str(new_app)], check=False)
-
-        script = work / "swap.sh"
-        script.write_text(SWAP_SCRIPT, encoding="utf-8")
-        script.chmod(0o755)
-        log.info("swapping %s -> %s", new_app, dest)
-        subprocess.Popen(
-            ["/bin/sh", str(script), str(dest), str(new_app), str(os.getpid())],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        )
-        return None
+        new_app = stage_update(info, work)
+    except UpdateError as exc:
+        log.error("update aborted: %s", exc)
+        shutil.rmtree(work, ignore_errors=True)
+        return str(exc)
     except Exception as exc:  # noqa: BLE001 - surfaced to the user
         log.exception("update failed")
+        shutil.rmtree(work, ignore_errors=True)
         return f"{type(exc).__name__}: {exc}"
+    try:
+        spawn_swap(dest, new_app, work, swap_log_path())
+    except Exception as exc:  # noqa: BLE001 - the menu must not stay “Downloading…”
+        log.exception("could not hand over to the swap script")
+        shutil.rmtree(work, ignore_errors=True)
+        return f"could not start the swap: {type(exc).__name__}: {exc}"
+    return None
 
 
 # ----------------------------------------------------------- menu bar ----
@@ -335,6 +270,14 @@ def run_menubar(dashboard: Dashboard) -> int:
         menu.addItem_(entry)
         return entry
 
+    def show(status: str, *, version: str = "", current: str = "") -> None:
+        """Main thread only — put the update entry into ``status``."""
+        set_update_entry(
+            update_item, status, version=version, current=current,
+            cancel_reset=lambda: delegate.cancelPreviousPerformRequestsWithTarget_selector_object_(
+                delegate, "resetTitle:", None),
+        )
+
     class Delegate(NSObject):
         # --- menu actions (selectors) --------------------------------
         def openDashboard_(self, sender):
@@ -344,14 +287,17 @@ def run_menubar(dashboard: Dashboard) -> int:
             threading.Thread(target=dashboard.rescan, daemon=True).start()
 
         def checkUpdates_(self, sender):
-            threading.Thread(target=self._look, daemon=True).start()
+            if pending.get("installing"):
+                return
+            show("checking")
+            threading.Thread(target=self._look, args=(True,), daemon=True).start()
 
         def applyUpdate_(self, sender):
             info = pending.get("update")
-            if not info:
+            if not info or pending.get("installing"):
                 return
-            update_item.setTitle_(f"Downloading {info['version']}…")
-            update_item.setEnabled_(False)
+            pending["installing"] = True
+            show("installing", version=info["version"])
             threading.Thread(target=self._install, args=(info,), daemon=True).start()
 
         def quit_(self, sender):
@@ -359,28 +305,55 @@ def run_menubar(dashboard: Dashboard) -> int:
             nsapp.terminate_(None)
 
         # --- called from worker threads (via performSelectorOnMainThread)
-        def markUpdate_(self, payload):
-            info = json.loads(payload)
-            pending["update"] = info
-            update_item.setTitle_(f"Update to {info['version']} available…")
-            update_item.setHidden_(False)
-            update_item.setEnabled_(True)
+        def handleCheck_(self, payload):
+            """Turn a finished release check into menu state (+ feedback)."""
+            res = json.loads(payload)
+            if res["status"] == "update":
+                if pending.get("installing"):
+                    return                      # never re-arm mid-install
+                pending["update"] = res["info"]
+                show("update", version=res["info"]["version"])
+                return
+            if not res.get("interactive"):
+                return                          # background poll: stay quiet
+            if res["status"] == "uptodate":
+                pending.pop("update", None)
+                show("uptodate", current=res["latest"])
+                self.performSelector_withObject_afterDelay_("resetTitle:", None, 5.0)
+            elif res["status"] == "disabled":
+                show("disabled")
+            else:
+                show("error")
+                alert("Could not check for updates", res.get("error") or "unknown error")
+
+        def resetTitle_(self, _):
+            """Revert the transient “up to date” line to the idle entry."""
+            if pending.get("update") or pending.get("installing"):
+                return
+            show("idle")
 
         def updateFailed_(self, message):
-            update_item.setTitle_("Check for updates…")
-            update_item.setEnabled_(True)
+            pending["installing"] = False
+            if pending.get("update"):
+                show("update", version=pending["update"]["version"])  # one click retries
+            else:
+                show("error")
             alert("Update failed", str(message))
+
+        def quitAfterUpdate_(self, _):
+            dashboard.stop()
+            nsapp.terminate_(None)
 
         # --- workers -------------------------------------------------
         @objc.python_method
-        def _look(self):
-            info = latest_release(version())
-            if info:
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "markUpdate:", json.dumps(info), False)
+        def _look(self, interactive: bool = False) -> None:
+            res = check_release(version())
+            res["interactive"] = bool(interactive)
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "handleCheck:", json.dumps(res), False)
 
         @objc.python_method
-        def _install(self, info):
+        def _install(self, info) -> None:
             error = download_and_apply(info)
             if error:
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
@@ -389,14 +362,10 @@ def run_menubar(dashboard: Dashboard) -> int:
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
                     "quitAfterUpdate:", None, False)
 
-        def quitAfterUpdate_(self, _):
-            dashboard.stop()
-            nsapp.terminate_(None)
-
         def pollUpdates_(self, _):
             while True:
                 time.sleep(UPDATE_INTERVAL)
-                self._look()
+                self._look(False)
 
     def alert(title: str, message: str) -> None:
         box = NSAlert.alloc().init()
@@ -411,7 +380,7 @@ def run_menubar(dashboard: Dashboard) -> int:
     add("Open dashboard", "openDashboard:", hidden=False)
     add("Rescan now", "rescan:", hidden=False)
     menu.addItem_(NSMenuItem.separatorItem())
-    update_item = add("Check for updates…", "checkUpdates:")
+    update_item = add("Check for updates…", CHECK_ACTION)
     menu.addItem_(NSMenuItem.separatorItem())
     about = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
         f"{APP_NAME} {version()}", None, "")
@@ -433,7 +402,7 @@ def run_menubar(dashboard: Dashboard) -> int:
 
     webbrowser.open(dashboard.url)
 
-    threading.Thread(target=delegate._look, daemon=True).start()
+    threading.Thread(target=delegate._look, args=(False,), daemon=True).start()
     threading.Thread(target=delegate.pollUpdates_, args=(None,), daemon=True).start()
 
     log.info("menu bar ready")
@@ -457,18 +426,29 @@ def run_headless(dashboard: Dashboard) -> int:
 
 
 def cli_check_updates() -> int:
-    """``--check-updates``: print the raw release feed result and exit."""
-    try:
-        data = fetch_latest(version())
-    except Exception as exc:  # noqa: BLE001 - printed for diagnostics
-        print(json.dumps({"current": version(), "error": f"{type(exc).__name__}: {exc}"}))
+    """``--check-updates``: print the release-feed decision as JSON and exit."""
+    current = version()
+    result = check_release(current)
+    print(json.dumps({"current": current, **result}, indent=2))
+    return 1 if result["status"] == "error" else 0
+
+
+def cli_apply_update() -> int:
+    """``--update``: check for a newer release and install it right now.
+
+    The process exits once the download is staged; the detached swap script
+    then replaces the bundle and relaunches the app.
+    """
+    current = version()
+    result = check_release(current)
+    print(json.dumps({"current": current, **result}, indent=2))
+    if result["status"] != "update":
+        return 1 if result["status"] == "error" else 0
+    error = download_and_apply(result["info"])
+    if error:
+        print(f"update failed: {error}", file=sys.stderr)
         return 1
-    print(json.dumps({
-        "current": version(),
-        "tag": data.get("tag_name"),
-        "assets": [a.get("name") for a in data.get("assets", [])],
-        "update": latest_release(version()),
-    }, indent=2))
+    print("update downloaded — quitting so the bundle can be replaced and relaunched")
     return 0
 
 
@@ -479,6 +459,8 @@ def main() -> int:
 
     os.environ.setdefault("TENNIS_STATS_DATA_DIR", str(data_dir()))
     setup_logging()
+    if "--update" in sys.argv[1:]:
+        return cli_apply_update()
     log.info("%s %s starting (%s, frozen=%s)", APP_NAME, version(), platform.machine(), frozen())
 
     port = preferred_port()

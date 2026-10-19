@@ -49,15 +49,28 @@ Local state lives outside the app, so updates never touch it:
 
 ### Updates
 
-The app asks GitHub for the latest release at launch and every six hours. When a
-newer version exists the menu bar entry becomes
-**"Update to 1.0.1 available…"** — one click downloads the new build, replaces
-itself in `/Applications` and relaunches. Open tabs keep working; the DB and
-cache are untouched.
+The app asks GitHub for the latest release at launch and every six hours. When
+a newer version exists the menu entry turns into an installer —
+**"Update to 1.0.3 available — click to install"** — and one click downloads the
+matching archive, verifies it (published SHA256 checksum **and** the app's code
+signature), replaces the bundle in `/Applications` and relaunches it. Open tabs
+keep working; the DB and cache are untouched.
+
+Every other answer of the update entry is explicit too: **"Checking for
+updates…"** while the feed is read, **"✓ 1.0.2 is the latest version"** for five
+seconds after a manual check that found nothing, and an alert with the reason
+when the check or the install fails — a click never silently does nothing. The
+swap is logged to `logs/update.log` next to `launcher.log`, and a failed copy
+restores the previous app instead of leaving a half-replaced bundle.
 
 To keep the friend's Mac and an Intel Mac both supported, each release publishes
 one archive per architecture (`-arm64`, and `-x86_64` when that build is
 enabled); the updater downloads the one matching the machine it runs on.
+
+**Migration:** apps installed from **v1.0.1 or older** cannot self-update — that
+release only changed the menu entry's title, so its click re-ran the check.
+Replace such an install once by hand (download the DMG of v1.0.3 or newer);
+every later update is one click again.
 
 If an update never shows up, ask for the output of
 
@@ -65,9 +78,16 @@ If an update never shows up, ask for the output of
 "/Applications/Tennis Stats.app/Contents/MacOS/Tennis Stats" --check-updates
 ```
 
-which prints the release feed (tag, assets, whether an update was selected).
+which prints the decision as JSON — `status` (`update` / `uptodate` /
+`disabled` / `error`), the chosen archive and its checksum URL, or the error.
+Adding `--update` runs the whole check + install + relaunch from the terminal.
 The launcher log is at
-`~/Library/Application Support/TennisStats/logs/launcher.log`.
+`~/Library/Application Support/TennisStats/logs/launcher.log` (the swap log:
+`logs/update.log` beside it).
+
+Two environment hooks exist for tests: `TENNIS_STATS_RELEASE_API` points the
+feed somewhere other than GitHub, `TS_SWAP_TRIES` shortens the script's 60 s
+wait for the app to quit.
 
 ## Quick start (development)
 
@@ -143,7 +163,8 @@ core/
   tennisabstract.py player id resolution + profile/tables fetch + cache
 web/index.html   the dashboard (vanilla JS, no build step)
 desktop/
-  launcher.py       menu-bar app: uvicorn thread, browser, self-updater
+  launcher.py       menu-bar app: uvicorn thread, browser, update entry, CLI
+  updater.py        self-update: release feed, verification, swap, menu model
   TennisStats.spec  PyInstaller bundle definition
   build_dmg.sh      builds dist/ app + DMG (install) + ZIP (update)
   run_local.sh      launches dist/ app as a temporary instance (own port, no update)
