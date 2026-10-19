@@ -137,7 +137,12 @@ def verify_checksum(archive: Path, sums_url: str | None, name: str) -> None:
     expected = None
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("*") == name:
+        if len(parts) != 2:
+            continue
+        # Entries are either bare ("TennisStats-1.0.3-arm64.zip") or carry the
+        # build path the shasum ran from ("dist/TennisStats-1.0.3-arm64.zip")
+        # — match on the file name, or the layer silently never runs.
+        if PurePosixPath(parts[1].lstrip("*")).name == name:
             expected = parts[0].lower()
             break
     if not expected:

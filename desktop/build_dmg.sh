@@ -49,7 +49,10 @@ hdiutil create -quiet -volname "Tennis Stats" -srcfolder dist/dmgroot \
   -ov -format UDZO "$DMG"
 rm -rf dist/dmgroot
 
-shasum -a 256 "$DMG" "$ZIP" | tee "dist/SHA256SUMS-${VERSION}-${ARCH}.txt"
+# Checksums with bare file names, so `sha256sum -c SHA256SUMS-*.txt` works
+# right after download (and the updater's verify_checksum matches them).
+( cd dist && shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" ) \
+  | tee "dist/SHA256SUMS-${VERSION}-${ARCH}.txt"
 
 du -sh "$APP" "$DMG" "$ZIP"
 echo "==> done"

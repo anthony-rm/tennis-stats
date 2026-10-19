@@ -292,6 +292,31 @@ def test_stage_update_accepts_the_published_checksum(http_root, tmp_path):
     assert updater.stage_update(info, work).name == "Fake.app"
 
 
+def test_stage_update_matches_checksum_entries_carrying_the_build_path(http_root, tmp_path):
+    """Published SUMS files list ``dist/…`` paths — the entry must still match.
+
+    A non-matching entry would silently *skip* verification instead of
+    catching a corrupt archive, which is exactly what happened against the
+    real v1.0.3 release.
+    """
+    app = make_app(tmp_path / "src", "1.0.2")
+    name = updater.asset_name("1.0.2")
+    zip_app(app, tmp_path / name)
+    sums = tmp_path / updater.sums_name("1.0.2")
+    work = tmp_path / "work"
+    work.mkdir()
+    info = {"version": "1.0.2", "url": f"{http_root}/{name}",
+            "sums_url": f"{http_root}/{sums.name}"}
+
+    sums.write_text(f"{'0' * 64}  dist/{name}\n", encoding="utf-8")   # wrong hash
+    with pytest.raises(updater.UpdateError, match="corrupt"):
+        updater.stage_update(info, work)
+
+    shutil.rmtree(work / "staging", ignore_errors=True)
+    sums.write_text(f"{updater.sha256_of(tmp_path / name)}  dist/{name}\n", encoding="utf-8")
+    assert updater.stage_update(info, work).name == "Fake.app"
+
+
 def test_stage_update_survives_an_unreachable_checksum(http_root, tmp_path):
     """The checksum is best effort: a dead SUMS URL must not block updates."""
     app = make_app(tmp_path / "src", "1.0.2")
