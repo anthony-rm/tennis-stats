@@ -137,15 +137,17 @@ class JobManager:
     # ------------------------------------------------------------- odds ---
     async def _run_odds(self, match_ids: Optional[list[str]], force: bool = False) -> None:
         kind = "odds"
-        if match_ids:
-            # an explicit list is always taken verbatim
+        if match_ids is not None:
+            # an explicit scope (the dashboard's selected lines) is taken
+            # verbatim — an EMPTY list means "nothing", never "the whole list"
             targets = [str(m) for m in match_ids]
         elif force:
             # refresh mode: every match, even the ones whose odds are already shown
             targets = [str(m["match_id"]) for m in self.store.list_matches()
                        if not m.get("live")]
         else:
-            # default pass: all missing odds, the whole list (not a selection)
+            # no scope given: the default pass covers all missing odds of the
+            # whole list (the dashboard narrows it by sending match_ids)
             targets = [str(m["match_id"]) for m in self.store.matches_needing_odds()]
         self._update(kind, status="running", message="starting browser",
                      step=0, total=len(targets), started_at=_now(),
@@ -197,23 +199,28 @@ class JobManager:
     # ------------------------------------------------------------ stats ---
     async def _run_stats(self, names: Optional[list[str]]) -> None:
         kind = "stats"
-        if not names:
-            # default pass: every player of the list MISSING stats (a stored
-            # payload is kept — a stored error is retried)
+        present = self.store.get_stats()
+        if names is not None:
+            # explicit scope (the dashboard's selected lines): those players
+            # only — an EMPTY list means "nobody", never "the whole list";
+            # the missing/error rule below still decides who is fetched
+            scope = list(dict.fromkeys(str(n) for n in names))
+        else:
+            # default scope: every player of the list
             matches = self.store.list_matches()
-            names = list(dict.fromkeys(
+            scope = list(dict.fromkeys(
                 [m["player1"] for m in matches if m.get("player1")] +
-                [m["player2"] for m in matches if m.get("player2")]
+                [m["player2"] for m in matches if m.get("player2")],
             ))
-            present = self.store.get_stats()
-            names = [n for n in names
-                     if n not in present or present[n].get("error")]
-        names = [n for n in names if n]
+        # in every scope: a stored payload is kept — a stored error is retried
+        names = [n for n in scope if n and (n not in present or present[n].get("error"))]
         self._update(kind, status="running", message="fetching player stats",
                      step=0, total=len(names), started_at=_now(),
                      finished_at=None, result=None)
         if not names:
-            self._update(kind, status="done", message="player stats already up to date",
+            self._update(kind, status="done",
+                         message="player stats already up to date" if scope
+                                 else "no player selected",
                          finished_at=_now(), result={"stored": 0, "unresolved": []})
             return
 

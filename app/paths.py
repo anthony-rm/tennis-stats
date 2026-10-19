@@ -7,9 +7,10 @@ resolves a path here. A plain ``git clone`` run keeps using ``<repo>/data``.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_DATA_DIR = "TENNIS_STATS_DATA_DIR"
@@ -57,13 +58,53 @@ def clear_cache(path: Optional[Path] = None) -> dict:
         files += 1
         total += size
     # drop the now-empty day directories, deepest first
+    _drop_empty_dirs(root)
+    return {"files": files, "bytes": total, "failed": failed}
+
+
+def clear_cache_players(path: Optional[Path], names: Iterable[str]) -> dict:
+    """Delete the cached pages of the given players only (scoped "Clear data").
+
+    The cache is read back by *player name* — ``core.tennisabstract.load_cached_by_name``
+    matches the ``player_name`` inside every payload — so the files are found
+    the same way here: one parse per cached file, and only the players that
+    went are unlinked. The rest of the tree (players still on the grid) is
+    kept, which is the point of a scoped clear. Same return shape as
+    :func:`clear_cache`; day directories left empty are dropped.
+    """
+    root = Path(path) if path is not None else cache_dir()
+    wanted = {str(n).casefold() for n in names if n}
+    files = total = failed = 0
+    candidates = sorted(root.rglob("*.json")) if wanted else []
+    for item in candidates:
+        if not item.is_file():
+            continue
+        try:
+            payload = json.loads(item.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue                      # unreadable payload: not ours to judge
+        if str(payload.get("player_name", "")).casefold() not in wanted:
+            continue
+        try:
+            size = item.stat().st_size
+            item.unlink()
+        except OSError:
+            failed += 1
+            continue
+        files += 1
+        total += size
+    _drop_empty_dirs(root)
+    return {"files": files, "bytes": total, "failed": failed}
+
+
+def _drop_empty_dirs(root: Path) -> None:
+    """Remove the (now empty) day directories, deepest first."""
     for item in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         if item.is_dir():
             try:
                 item.rmdir()
             except OSError:
                 pass
-    return {"files": files, "bytes": total, "failed": failed}
 
 
 def asset_dir() -> Path:

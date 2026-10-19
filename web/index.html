@@ -213,7 +213,11 @@
   .match-line { display: flex; gap: 8px; align-items: flex-start; }
   .match-line .row-pick { margin: 3px 0 0; }
   .match-text { min-width: 0; flex: 1; }
-  .match-name { font-weight: 600; }
+  .match-name { display: block; font-weight: 600; }
+  /* the name links to the Winamax page of the match (new tab); it keeps the
+     plain-text look until hover so the grid reads the same as before */
+  a.match-name { color: inherit; text-decoration: none; }
+  a.match-name:hover, a.match-name:focus-visible { color: var(--accent); text-decoration: underline; }
   .match-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
 
   /* selection feedback on headers (checked / partially checked) */
@@ -259,11 +263,11 @@
   </div>
   <div class="toolbar">
     <button class="primary" id="btn-scan" title="Re-scan the whole Winamax tennis list (all days)">↻ Refresh list</button>
-    <button id="btn-odds" title="Extract every market for every match that still has no odds — the whole list, not only the selected lines (live matches skipped)">Fetch odds</button>
-    <button id="btn-odds-refresh" title="Re-fetch the odds of every match, even the ones already shown — the odds move during the day, so this always pulls the current values (live matches skipped)">↻ Refresh odds</button>
-    <button id="btn-stats" title="Fetch Tennis Abstract stats for every player still missing them — the whole list, not only the selected lines">Fetch stats</button>
+    <button id="btn-odds" title="Extract every market for the SELECTED matches that still have no odds (live matches skipped) — tick a line or a day first">Fetch odds</button>
+    <button id="btn-odds-refresh" title="Re-fetch the odds of the SELECTED matches, even the ones already shown — the odds move during the day, so this always pulls the current values (live matches skipped)">↻ Refresh odds</button>
+    <button id="btn-stats" title="Fetch Tennis Abstract stats for the players of the SELECTED matches still missing them (stored data kept, stored fetch errors retried)">Fetch stats</button>
     <button class="danger" id="btn-clear"
-            title="Delete every downloaded match, odd and player stat, plus the cached player pages — your selection and copy format are kept (disabled while a fetch runs)">Clear data</button>
+            title="Delete the downloaded data of the SELECTED matches — their rows, odds, the stats of their players (when no other listed match needs them) and their cached player pages. The other matches, your selection and copy format are kept (disabled while a fetch runs)">Clear data</button>
     <span class="spacer"></span>
     <input type="search" id="search" placeholder="Search player / tournament…" aria-label="Search matches">
     <label class="inline"><input type="checkbox" id="hide-live"> hide live</label>
@@ -468,6 +472,16 @@ function visibleRows() {
 /* selected lines = the matches that take part in chips / copy (the filter) */
 function isActive(mid) { return state.lines.has(mid); }
 function activeRows() { return visibleRows().filter((r) => state.lines.has(r.match_id)); }
+
+/* Scope of the fetch buttons and of "Clear data": the selected lines
+   themselves. The view filters (search / hide live) only hide rows from the
+   grid — they never narrow what an action touches, exactly like Copy
+   selection, so a filtered-out row is still fetched / cleared with its line. */
+function selectedMatches() {
+  return state.rows.filter((r) => state.lines.has(r.match_id));
+}
+
+const NO_SELECTION = "No match selected — tick a line or a day first";
 
 function isSelected(mid, col) {
   const s = state.selection.get(mid);
@@ -822,8 +836,19 @@ function matchFragment(r, specs) {
   const metaParts = [meta.tournament, meta.round, startText,
                      r.live && startText !== "in play" ? "in play" : ""]
     .filter((p) => p !== undefined && p !== null && String(p).trim() !== "");
+  const nameInner = `${esc(r.player1)} vs ${esc(r.player2)}${badges.join("")}`;
+  // the scan stores the Winamax URL of the match: clicking the name opens that
+  // page in a new tab (only a winamax https URL counts, so a malformed row
+  // stays plain text instead of becoming an anchor)
+  const wUrl = String(meta.url || "").trim();
+  const isWinamax = /^https:\/\/[^/\s]*winamax\.[^/\s]+\/\S+$/i.test(wUrl);
+  const nameTag = isWinamax ? "a" : "div";
+  const nameAttrs = isWinamax
+    ? ` href="${esc(wUrl)}" target="_blank" rel="noopener noreferrer"` +
+      ` title="Open this match on Winamax (new tab)"`
+    : "";
   txt.innerHTML =
-    `<div class="match-name">${esc(r.player1)} vs ${esc(r.player2)}${badges.join("")}</div>` +
+    `<${nameTag} class="match-name"${nameAttrs}>${nameInner}</${nameTag}>` +
     `<div class="match-meta">${esc(metaParts.join(" · "))}</div>`;
   line.appendChild(rowCb);
   line.appendChild(txt);
@@ -1196,38 +1221,64 @@ async function post(path, body, okMsg) {
 $("btn-scan").addEventListener("click", () =>
   post("/api/scan", {stop_at_night_gap: false, include_live: true}, "Scanning Winamax (all days)…"));
 
+/* The three fetch buttons act on the SELECTED LINES (never on the whole
+   list): the ids / names of selectedMatches() become the job's scope, and an
+   empty selection asks for a line instead of silently doing everything. */
 $("btn-odds").addEventListener("click", () => {
-  const pending = state.rows.filter((r) => !r.has_odds && !r.live);
+  const rows = selectedMatches();
+  if (!rows.length) { toast(NO_SELECTION, true); return; }
+  const pending = rows.filter((r) => !r.has_odds && !r.live);
   if (!pending.length) {
-    toast("Every match already has odds — “↻ Refresh odds” pulls the current ones", true);
+    toast("The selected matches already have odds — “↻ Refresh odds” pulls the current ones", true);
     return;
   }
-  post("/api/odds", {},
-       `Fetching odds for ${pending.length} missing match${pending.length === 1 ? "" : "es"}…`);
+  post("/api/odds", {match_ids: pending.map((r) => r.match_id)},
+       `Fetching odds for ${pending.length} selected match${pending.length === 1 ? "" : "es"}…`);
 });
 
 /* the odds move during the day: re-fetch them even where they are shown */
 $("btn-odds-refresh").addEventListener("click", () => {
-  const targets = state.rows.filter((r) => !r.live);
-  if (!targets.length) { toast("No match to refresh", true); return; }
-  post("/api/odds", {force: true},
-       `Refreshing odds for ${targets.length} match${targets.length === 1 ? "" : "es"}…`);
+  const selected = selectedMatches();
+  if (!selected.length) { toast(NO_SELECTION, true); return; }
+  const rows = selected.filter((r) => !r.live);
+  if (!rows.length) { toast("Only live matches are selected — their odds are never fetched", true); return; }
+  // an explicit id list is taken verbatim by the API: stored odds are
+  // re-pulled for exactly these matches (force would mean "the whole list")
+  post("/api/odds", {match_ids: rows.map((r) => r.match_id)},
+       `Refreshing odds for ${rows.length} selected match${rows.length === 1 ? "" : "es"}…`);
 });
 
-$("btn-stats").addEventListener("click", () =>
-  post("/api/stats", {}, "Fetching missing player stats…"));
+$("btn-stats").addEventListener("click", () => {
+  const rows = selectedMatches();
+  if (!rows.length) { toast(NO_SELECTION, true); return; }
+  const names = [...new Set(rows.flatMap((r) => [r.player1, r.player2]).filter(Boolean))];
+  if (!names.length) { toast("The selected matches have no player names", true); return; }
+  post("/api/stats", {names},
+       `Fetching the missing stats of ${names.length} player${names.length === 1 ? "" : "s"}` +
+       ` (${rows.length} selected match${rows.length === 1 ? "" : "es"})…`);
+});
 
-/* "Clear data": wipes what was downloaded (matches, odds, stats) and the TA
-   cache on disk; the selection / copy format are kept. Confirmed first — the
-   grid only comes back with a new scan (or the auto-scan on next start). */
+/* "Clear data": wipes what was downloaded for the SELECTED matches — their
+   rows, odds, the stats of their players (the ones no other listed match
+   still needs) and their cached pages; the other matches, the selection and
+   the copy format are kept. Confirmed first, with the match list, because the
+   cleared lines only come back with a new scan (or the auto-scan on start). */
 $("btn-clear").addEventListener("click", async () => {
+  const rows = selectedMatches();
+  if (!rows.length) { toast(NO_SELECTION, true); return; }
+  const list = rows.slice(0, 5).map((r) => `${r.player1} vs ${r.player2}`).join("\n");
+  const more = rows.length > 5 ? `\n… and ${rows.length - 5} more` : "";
   const ok = confirm(
-    "Delete every downloaded match, odd and player stat, plus the cached " +
-    "player pages?\n\nYour selection and copy format are kept — the grid " +
-    "stays empty until the next scan.");
+    `Delete the downloaded data of the ${rows.length} selected match` +
+    `${rows.length === 1 ? "" : "es"}?\n\n${list}${more}\n\n` +
+    "Their rows, odds, the stats of their players (when no other listed match " +
+    "needs them) and their cached player pages go. The other matches, your " +
+    "selection and copy format are kept — the cleared matches come back with " +
+    "the next scan.");
   if (!ok) return;
   try {
-    const d = await api("/api/clear", {method: "POST", body: "{}"});
+    const d = await api("/api/clear", {method: "POST",
+      body: JSON.stringify({match_ids: rows.map((r) => r.match_id)})});
     const mb = (d.cache_bytes || 0) / 1048576;
     toast(`Cleared ${d.matches} match${d.matches === 1 ? "" : "es"}, ` +
           `${d.stats} player stat${d.stats === 1 ? "" : "s"} and ` +

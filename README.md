@@ -102,18 +102,24 @@ Open <http://127.0.0.1:8000>. The Winamax scan starts automatically on server
 start; then press **Fetch odds** and **Fetch stats** (both run as background
 jobs with live progress via SSE):
 
-* **Fetch odds** — every match of the list that has no odds yet (the whole
-  list, not only the selected lines; live matches skipped);
-* **↻ Refresh odds** — re-fetch the odds of every match, *including the ones
-  already shown*, because the odds move during the day;
-* **Fetch stats** — every player of the list still missing Tennis Abstract
-  data (already stored players are skipped, stored fetch errors are retried;
-  three consecutive network failures stop the pass with an error instead of
-  recording every remaining player as absent);
-* **Clear data** — deletes every downloaded match / odd / player stat plus
-  the cached player pages on disk (confirmed first, disabled while a job
-  runs); the selection and copy format are kept, and the grid comes back
+* **Fetch odds** — the selected lines that have no odds yet (live matches
+  skipped); **↻ Refresh odds** re-fetches the odds of the selected lines,
+  *including the ones already shown*, because the odds move during the day;
+* **Fetch stats** — the players of the selected lines still missing Tennis
+  Abstract data (already stored players are skipped, stored fetch errors are
+  retried; three consecutive network failures stop the pass with an error
+  instead of recording every remaining player as absent);
+* **Clear data** — deletes the downloaded data of the selected lines: their
+  rows and odds, the stats of their players *when no other listed match still
+  needs them*, and those players' cached pages on disk. Confirmed first (the
+  dialog lists the matches), disabled while a job runs; the other matches,
+  your selection and copy format are kept, and the cleared lines come back
   with the next scan.
+
+All four are **line-scoped** — **Fetch odds**, **↻ Refresh odds**, **Fetch
+stats** and **Clear data** act on the selected lines only, so tick a line or a
+day first; with nothing selected they ask for a line instead of quietly doing
+the whole list.
 
 The grid fills in **live**: each stored match / player pushes a `data` event
 on the SSE stream and the table reloads (throttled) while the job is still
@@ -129,8 +135,8 @@ the title shows the dashboard version.
   boxes **only for the selected lines** (untick a line and its boxes leave the
   copy without being lost);
 * **⧉ Copy selection** copies the boxes of the selected lines; **⧉ Copy match
-  list** copies those matches as `A vs B` lines (the fetch buttons are not
-  line-scoped — they always cover the whole list, see above).
+  list** copies those matches as `A vs B` lines. The three fetch buttons and
+  **Clear data** take the same scope (the selected lines), see above.
 
 Requires Google Chrome installed (Playwright uses `channel="chrome"`, so no
 browser download is needed) and network access to winamax.fr /
@@ -305,6 +311,10 @@ tests verify it parses (`node --check`) and is up to date.
 * Tennis Abstract gaps are flagged in the row (`TA?` badge) — unresolved ids,
   players not fetched yet and stored fetch failures — instead of silently
   showing empty data.
+* Clicking a **match name** (first column) opens that match's Winamax page in a
+  new tab: the scan stores the match URL (`url` in `/api/matches`'s `raw`), so
+  the link needs no extra lookup. A row whose URL is not a Winamax `https` link
+  stays plain text.
 
 ### Export semantics
 
@@ -338,18 +348,18 @@ browser (`localStorage`), the LLM format is the initial default.
 | GET | `/api/columns` | checkbox catalogue (groups A–L) |
 | GET | `/api/matches?form_n=10` | rows + computed values + stats status (`form_n` defaults to 10) |
 | POST | `/api/scan` | start list scan `{stop_at_night_gap=false, include_live}` |
-| POST | `/api/odds` | start odds pass `{match_ids?, force?}` (default: all missing odds, live skipped; `force=true` re-fetches even stored odds) |
-| POST | `/api/stats` | start stats fetch `{names?}` (default: all players **missing** stats) |
+| POST | `/api/odds` | start odds pass `{match_ids?, force?}` — `match_ids` scopes it (verbatim; `[]` = nothing) and is what the dashboard sends for its selected lines; default: all missing odds, live skipped, `force=true` re-fetches even stored odds |
+| POST | `/api/stats` | start stats fetch `{names?}` — `names` scopes it (`[]` = nothing) and is what the dashboard sends for the players of its selected lines; inside that scope the same rule applies: default = all players **missing** stats, stored errors retried |
 | GET | `/api/jobs` | job states (polling fallback) |
 | GET | `/api/scan/stream` | SSE events: job progress + `{"type":"data"}` per stored row (live grid) |
 | GET/POST | `/api/selections` | load/save the cell selection |
 | POST | `/api/export` | `{cells, format, form_n?}` → `{text, chars, rows, columns}` — `format` ∈ `llm` (default) `tsv` `md` `md_block` `json` |
-| POST | `/api/clear` | drop the downloaded rows (matches, odds, stats) + the player cache → `{matches, stats, cache_files, cache_bytes, failed}`; selections untouched, `409` while a job runs |
+| POST | `/api/clear` | drop downloaded rows (matches, odds, stats) + the player cache → `{matches, stats, cache_files, cache_bytes, failed}`; `{match_ids}` restricts both halves to those matches (their players' stats go only when no remaining match needs them, empty list = nothing); selections untouched, `409` while a job runs |
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 38 tests, offline (fixtures)
+.venv/bin/python -m pytest tests/ -q      # offline, fixtures only (no network)
 ```
 
 * `tests/test_winamax_core.py` — selector regression against real DOM snapshots
@@ -357,8 +367,9 @@ browser (`localStorage`), the LLM format is the initial default.
   "userscript build is up to date" check.
 * `tests/test_app.py` — column computation on frozen Tennis Abstract payloads,
   exporter formats, SQLite semantics.
-* `tests/test_jobs.py` — job targeting (missing vs force vs explicit ids),
-  per-row `data` events, version lookup — Winamax / TA replaced by fakes.
+* `tests/test_jobs.py` — job targeting (missing vs force vs explicit id /
+  name scopes), per-row `data` events, version lookup — Winamax / TA replaced
+  by fakes.
 
 Refresh a fixture with a live capture whenever Winamax changes its DOM:
 
@@ -446,3 +457,7 @@ launchctl load ~/Library/LaunchAgents/com.tennis.stats.scan.plist
   self-contained file with its existing update URL.
 * An extra export format (`md_block`, one Markdown block per match) was added
   alongside the planned TSV/Markdown/JSON toggle.
+* The three fetch buttons and **Clear data** are **line-scoped** (PLAN.md §5
+  had them cover the whole list): they act on the selected lines, and the
+  endpoints keep their whole-list meaning only when called without a scope —
+  an explicit empty scope never widens to "everything".

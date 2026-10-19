@@ -124,6 +124,24 @@ def test_odds_explicit_ids_are_taken_verbatim(tmp_path, monkeypatch, store):
     assert job["result"] == {"fetched": 1, "failed": []}
 
 
+def test_odds_explicit_empty_scope_fetches_nothing(tmp_path, monkeypatch, store):
+    """An explicit ``match_ids: []`` is "nobody selected", never "the whole
+    list" — an empty scope must never widen on its own."""
+    monkeypatch.setattr(jobs_mod, "WinamaxSession", FakeSession)
+    FakeSession.fetched = []
+    store.upsert_matches([_match("1")])
+    store.set_odds("1", ODDS)
+    jm = jobs_mod.JobManager(store, tmp_path / "cache")
+
+    job, _ = _run(jm, lambda: jm.start_odds([]))
+    assert FakeSession.fetched == []
+    assert job["message"] == "nothing to fetch"
+    # ... not even with force: the explicit scope wins over "refresh all"
+    job2, _ = _run(jm, lambda: jm.start_odds([], force=True))
+    assert FakeSession.fetched == []
+    assert job2["message"] == "nothing to fetch"
+
+
 # ----------------------------------------------------------------- stats ---
 def _fake_ta(fetched: list):
     def get_player(name, cache_dir, session=None):
@@ -173,6 +191,36 @@ def test_stats_retries_stored_errors_but_keeps_unresolved(tmp_path, monkeypatch,
     assert fetched == ["Novak Djokovic"]      # error retried, unresolved kept
     assert "error" not in store.get_stats()["Novak Djokovic"]
     assert job["result"] == {"stored": 1, "unresolved": []}
+
+
+def test_stats_explicit_names_scope_the_pass(tmp_path, monkeypatch, store):
+    """``{names}`` narrows the pass to the players of the selected lines; the
+    missing / stored-error rule still decides inside that scope."""
+    fetched: list[str] = []
+    monkeypatch.setattr(jobs_mod.ta, "get_player", _fake_ta(fetched))
+    store.upsert_matches([_match("1"), _match("2", p1="Alexander Zverev",
+                                               p2="Daniil Medvedev")])
+    store.upsert_stats("Novak Djokovic",
+                       {"player_name": "Novak Djokovic", "profile": {}, "tables": {}})
+    store.upsert_stats("Alexander Zverev",
+                       {"player_name": "Alexander Zverev", "profile": {}, "tables": {},
+                        "error": "network blip"})
+    jm = jobs_mod.JobManager(store, tmp_path / "cache")
+
+    job, _ = _run(jm, lambda: jm.start_stats(
+        ["Novak Djokovic", "Iga Swiatek", "Alexander Zverev"]))
+
+    # stored payload kept, stored error retried, the players of the other
+    # match never fetched (they are outside the scope)
+    assert fetched == ["Iga Swiatek", "Alexander Zverev"]
+    assert job["result"] == {"stored": 2, "unresolved": []}
+    assert "Daniil Medvedev" not in store.get_stats()
+
+    # an empty scope selects nobody instead of falling back to the whole list
+    fetched.clear()
+    job2, _ = _run(jm, lambda: jm.start_stats([]))
+    assert fetched == []
+    assert job2["message"] == "no player selected"
 
 
 def _raising_ta(exc_factory):

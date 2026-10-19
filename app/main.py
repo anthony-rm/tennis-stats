@@ -18,6 +18,11 @@ Endpoints
     POST /api/selections       save selection
     POST /api/export           selection -> text (llm | tsv | md | md_block | json)
     POST /api/clear            drop downloaded rows + the player cache
+                               ({match_ids} restricts both to those matches)
+
+The three fetch buttons and "Clear data" act on the dashboard's *selected
+lines*: the UI sends ``match_ids`` / ``names`` for them, and the no-argument
+form keeps covering the whole list (script / API use).
 """
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app import columns as columns_mod
 from app.exporter import FORMATS, export_text
 from app.jobs import JobBusy, JobManager
-from app.paths import app_version, asset_dir, cache_dir, clear_cache
+from app.paths import app_version, asset_dir, cache_dir, clear_cache, clear_cache_players
 from app.store import Store
 
 WEB_INDEX = asset_dir() / "web" / "index.html"
@@ -157,15 +162,21 @@ async def post_scan(body: Optional[dict] = Body(default=None)) -> dict:
 
 @app.post("/api/odds")
 async def post_odds(body: Optional[dict] = Body(default=None)) -> dict:
+    """Start the odds pass. ``{match_ids}`` scopes it (taken verbatim — the
+    dashboard sends its selected lines); an explicit empty list fetches
+    nothing rather than falling back to the whole list, and no body keeps the
+    default: every pending match, or every match with ``force``.
+    """
     body = body or {}
-    ids = body.get("match_ids")
-    if isinstance(ids, str):
-        ids = [ids]
+    if "match_ids" in body:
+        raw = body.get("match_ids") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        ids: Optional[list[str]] = [str(i) for i in raw]
+    else:
+        ids = None
     try:
-        job = jobs.start_odds(
-            [str(i) for i in ids] if ids else None,
-            force=bool(body.get("force")),
-        )
+        job = jobs.start_odds(ids, force=bool(body.get("force")))
     except JobBusy as exc:
         raise HTTPException(409, str(exc))
     return {"job": job}
@@ -173,10 +184,21 @@ async def post_odds(body: Optional[dict] = Body(default=None)) -> dict:
 
 @app.post("/api/stats")
 async def post_stats(body: Optional[dict] = Body(default=None)) -> dict:
+    """Start the stats fetch. ``{names}`` scopes it (the dashboard sends the
+    players of its selected lines); the missing/error rule still decides who
+    is actually fetched, an explicit empty list fetches nothing, and no body
+    keeps the default: every player of the list still missing stats.
+    """
     body = body or {}
-    names = body.get("names")
+    if "names" in body:
+        raw = body.get("names") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        names: Optional[list[str]] = [str(n) for n in raw]
+    else:
+        names = None
     try:
-        job = jobs.start_stats([str(n) for n in names] if names else None)
+        job = jobs.start_stats(names)
     except JobBusy as exc:
         raise HTTPException(409, str(exc))
     return {"job": job}
@@ -216,8 +238,14 @@ async def post_export(body: dict = Body(...)) -> dict:
 
 # -------------------------------------------------------------- cleanup ---
 @app.post("/api/clear")
-async def post_clear() -> dict:
+async def post_clear(body: Optional[dict] = Body(default=None)) -> dict:
     """Delete the downloaded data (matches, odds, stats) and the player cache.
+
+    ``{"match_ids": [...]}`` scopes both halves to those matches — what the
+    dashboard's selected lines send: their rows and odds go, plus the stats
+    and cached pages of their players that no other listed match still needs
+    (a player shared with an unselected line keeps his data). An empty /
+    unknown list deletes nothing; no body at all is the whole-list clear.
 
     Selections (the user's own cells / copy format) are never touched, and a
     running job makes it a 409: a scrape writing while we delete would race
@@ -225,8 +253,19 @@ async def post_clear() -> dict:
     """
     if any(jobs.is_running(kind) for kind in ("scan", "odds", "stats")):
         raise HTTPException(409, "a fetch is running — wait for it to finish")
-    cache = clear_cache(CACHE_DIR)
-    counts = store.clear_downloaded()
+    body = body or {}
+    if "match_ids" in body:
+        raw = body.get("match_ids") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        ids: Optional[list[str]] = [str(i) for i in raw]
+    else:
+        ids = None
+    counts = store.clear_downloaded(ids)
+    if ids is None:
+        cache = clear_cache(CACHE_DIR)
+    else:
+        cache = clear_cache_players(CACHE_DIR, counts["players"])
     return {"matches": counts["matches"], "stats": counts["stats"],
             "cache_files": cache["files"], "cache_bytes": cache["bytes"],
             "failed": cache["failed"]}

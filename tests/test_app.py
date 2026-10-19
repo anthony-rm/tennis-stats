@@ -431,7 +431,8 @@ def test_store_clear_downloaded_keeps_selection(tmp_path):
     s.upsert_stats("Novak Djokovic", DJOKOVIC)
     s.save_selection({"75620252": ["a.tournament"]}, "llm")
 
-    assert s.clear_downloaded() == {"matches": 2, "stats": 1}
+    assert s.clear_downloaded() == {"matches": 2, "stats": 1,
+                                    "players": ["Novak Djokovic"]}
     assert s.list_matches() == []
     assert s.get_stats() == {}
     assert s.matches_needing_odds() == []
@@ -439,7 +440,49 @@ def test_store_clear_downloaded_keeps_selection(tmp_path):
     assert sel["cells"] == {"75620252": ["a.tournament"]}
     assert sel["format"] == "llm"
     # idempotent: a second clear reports nothing left
-    assert s.clear_downloaded() == {"matches": 0, "stats": 0}
+    assert s.clear_downloaded() == {"matches": 0, "stats": 0, "players": []}
+    s.close()
+
+
+def test_store_clear_downloaded_scoped_keeps_the_other_lines(tmp_path):
+    """'Clear data' on selected lines: those rows go, the rest is untouched —
+    including the stats of a player an unselected match still needs."""
+    s = Store(tmp_path / "t.db")
+    selected = dict(MATCH, match_id="75620252")              # Djokovic / Swiatek
+    shared = dict(MATCH, match_id="9", player1="Novak Djokovic",
+                  player2="Alexander Zverev")                 # keeps Djokovic
+    lone = dict(MATCH, match_id="11", player1="Daniil Medvedev",
+                player2="Tommy Paul")
+    s.upsert_matches([selected, shared, lone])
+    odds = {"sectionCount": 3, "oddCount": 42, "buttonCount": 44, "sections": []}
+    s.set_odds("75620252", odds)
+    s.set_odds("11", odds)
+    s.upsert_stats("Novak Djokovic", DJOKOVIC)
+    s.upsert_stats("Iga Swiatek", SWIATEK)
+    s.upsert_stats("Daniil Medvedev", {"player_name": "Daniil Medvedev",
+                                       "player_id": "DaniilMedvedev",
+                                       "profile": {}, "tables": {}})
+    s.save_selection({"75620252": ["a.tournament"]}, "llm")
+
+    out = s.clear_downloaded(["75620252", "unknown-id"])
+
+    # one row gone (the unknown id clears nothing), one stats row gone
+    assert out["matches"] == 1
+    assert out["stats"] == 1
+    assert out["players"] == ["Iga Swiatek"]     # Djokovic still plays match 9
+    assert {m["match_id"] for m in s.list_matches()} == {"9", "11"}
+    assert s.get_match("75620252") is None
+    kept = s.get_match("11")
+    assert kept and kept["odds_json"], "an unselected match keeps its odds"
+    assert set(s.get_stats()) == {"Novak Djokovic", "Daniil Medvedev"}
+    # the user's own state never goes with the downloads
+    sel = s.get_selection() or {}
+    assert sel.get("cells") == {"75620252": ["a.tournament"]}
+    assert sel.get("format") == "llm"
+    # an empty / unknown scope is a clean no-op, never "clear everything"
+    assert s.clear_downloaded([]) == {"matches": 0, "stats": 0, "players": []}
+    assert s.clear_downloaded(["nope"]) == {"matches": 0, "stats": 0, "players": []}
+    assert len(s.list_matches()) == 2
     s.close()
 
 
@@ -456,3 +499,40 @@ def test_clear_cache_removes_the_tree_but_keeps_the_directory(tmp_path):
     assert tmp_path.is_dir()
     assert list(tmp_path.rglob("*")) == []
     assert paths.clear_cache(tmp_path) == {"files": 0, "bytes": 0, "failed": 0}
+
+
+def test_clear_cache_players_drops_only_the_named_pages(tmp_path):
+    """Scoped 'Clear data': the cached pages of the cleared players go, the
+    pages of the players still on the grid stay. Files are matched on the
+    payload's ``player_name`` — the same key ``load_cached_by_name`` reads
+    back — so an id-derived and an ``unresolved-`` file are both found."""
+    day, older = tmp_path / "2026-10-19", tmp_path / "2026-10-16"
+    day.mkdir(), older.mkdir()
+
+    def page(name: str, player_id) -> str:
+        return json.dumps({"player_name": name, "player_id": player_id,
+                           "fetched_at": "2026-10-19T10:00:00"})
+
+    (day / "NovakDjokovic.json").write_text(page("Novak Djokovic", "NovakDjokovic"),
+                                            encoding="utf-8")
+    (day / "IgaSwiatek.json").write_text(page("Iga Swiatek", "IgaSwiatek"),
+                                         encoding="utf-8")
+    (older / "unresolved-Zhang_Zhizhen.json").write_text(page("Zhang Zhizhen", None),
+                                                         encoding="utf-8")
+    (day / "junk.json").write_text("not json", encoding="utf-8")
+
+    out = paths.clear_cache_players(tmp_path, ["igA Swiatek", "Zhang Zhizhen"])  # case-folded
+
+    assert out["failed"] == 0
+    assert out["bytes"] == len(page("Iga Swiatek", "IgaSwiatek")) + \
+        len(page("Zhang Zhizhen", None))
+    assert out["files"] == 2
+    # the untouched player and the unreadable payload survive; the day dir
+    # left empty by the clear is dropped, the one still in use is not
+    assert sorted(p.name for p in tmp_path.rglob("*") if p.is_file()) == \
+        ["NovakDjokovic.json", "junk.json"]
+    assert day.is_dir()
+    assert not older.is_dir()
+    # an unknown / empty scope is a clean no-op
+    assert paths.clear_cache_players(tmp_path, ["Nobody Here", ""]) == \
+        {"files": 0, "bytes": 0, "failed": 0}

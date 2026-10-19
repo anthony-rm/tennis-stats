@@ -190,23 +190,70 @@ class Store:
         return out
 
     # ----------------------------------------------------------- clear ----
-    def clear_downloaded(self) -> dict:
-        """Drop every downloaded row (scan result, odds, stored player stats).
+    @staticmethod
+    def _chunks(values: list[str], size: int = 500) -> Iterable[list[str]]:
+        """Batches for an IN (...) clause (well under SQLite's 999-variable cap)."""
+        for i in range(0, len(values), size):
+            yield values[i:i + size]
 
-        The store half of the dashboard's "Clear data": selections are the
-        user's own choices, never downloads, so they are kept untouched.
-        Returns the removed row counts (``{"matches", "stats"}``).
+    def clear_downloaded(self, match_ids: Optional[Iterable[str]] = None) -> dict:
+        """Drop downloaded rows — every one of them, or only the given matches.
+
+        With ``match_ids`` this is the line-scoped "Clear data": those matches
+        go (row + odds) together with the stats of their players **that no
+        remaining match still needs**, so a player shared with an unselected
+        line keeps his data and the scoped clear never blanks a line it was
+        not asked to touch. Unknown ids clear nothing (an empty scope is a
+        no-op, never "clear everything"). Without ``match_ids`` every
+        downloaded row goes, as before.
+
+        Selections are the user's own choices, never downloads, so they are
+        kept untouched in both cases. Returns the removed row counts and the
+        names of the players that lost their stats (``{"matches", "stats",
+        "players"}``) — the caller drops their cached pages by name too, or a
+        re-fetch would silently restore them from the 24 h cache.
         """
         with self._conn:
-            matches = self._conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
-            stats = self._conn.execute("SELECT COUNT(*) FROM stats").fetchone()[0]
-            self._conn.execute("DELETE FROM matches")
-            self._conn.execute("DELETE FROM stats")
+            if match_ids is None:
+                matches = self._conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+                rows = self._conn.execute("SELECT player_key, payload_json FROM stats").fetchall()
+                stats = len(rows)
+                players = [r["player_key"] for r in rows]
+                self._conn.execute("DELETE FROM matches")
+                self._conn.execute("DELETE FROM stats")
+            else:
+                wanted = list(dict.fromkeys(str(m).strip() for m in match_ids if str(m).strip()))
+                if not wanted:
+                    return {"matches": 0, "stats": 0, "players": []}
+                all_rows = self.list_matches()
+                stored = {str(m["match_id"]) for m in all_rows}
+                targets = [m for m in wanted if m in stored]
+                if not targets:
+                    return {"matches": 0, "stats": 0, "players": []}
+                target_set = set(targets)
+                scoped = {p for m in all_rows if str(m["match_id"]) in target_set
+                          for p in (m.get("player1"), m.get("player2")) if p}
+                still = {p for m in all_rows if str(m["match_id"]) not in target_set
+                         for p in (m.get("player1"), m.get("player2")) if p}
+                # players still listed elsewhere keep their stats (their other
+                # line was not selected); only the rest goes
+                players = sorted(scoped - still)
+                stats = 0
+                for chunk in self._chunks(targets):
+                    q = ",".join("?" * len(chunk))
+                    self._conn.execute(
+                        f"DELETE FROM matches WHERE match_id IN ({q})", chunk)
+                for chunk in self._chunks(players):
+                    q = ",".join("?" * len(chunk))
+                    cur = self._conn.execute(
+                        f"DELETE FROM stats WHERE player_key IN ({q})", chunk)
+                    stats += cur.rowcount
+                matches = len(targets)
         try:
             self._conn.execute("VACUUM")   # hand the file space back
         except sqlite3.OperationalError:
             pass
-        return {"matches": matches, "stats": stats}
+        return {"matches": matches, "stats": stats, "players": players}
 
     # ------------------------------------------------------ selections ---
     def get_selection(self, name: str = "default") -> Optional[dict]:
