@@ -7,7 +7,10 @@ Cell conventions:
   * per-player stat columns (`pair=True`) render both players as "P1 | P2"
     (row order = the match row's player1 | player2);
   * "—" means unknown (stats not fetched / player unresolved / table absent);
-  * derived gap columns say who leads: "P1 +5", "P2 +0.15", "even", "never";
+  * time & day: Winamax speaks Europe/Paris (see OFFICIAL_TZ) — a.start is
+    converted to the machine's clock (start_display), while a.day groups a
+    match by its official Winamax day (match_date / day_label), never by the
+    date in the viewer's time zone;
   * Winamax game-market cells (a.games / a.spread and their ladders) are parsed
     from the stored odds pass (`odds_json`) — see _games_cells().
 """
@@ -17,8 +20,9 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 MISSING = "—"
 
@@ -45,7 +49,8 @@ GROUPS: tuple[Group, ...] = (
         # hidden: already shown in the row summary / day header, kept for the copy
         Column("a.tournament", "Tournament", hidden=True),
         Column("a.round", "Round", hidden=True),
-        Column("a.start", "Start time", "Europe/Paris; 'in play' for live matches",
+        Column("a.start", "Start time",
+               "your machine's clock — Winamax collects Europe/Paris kick-offs; 'in play' for live matches",
                hidden=True),
         Column("a.day", "Day", "Today (16/10/2026) / Tomorrow / +Nd", hidden=True),
         Column("a.odds", "1X2 odds", "P1 | P2", pair=True),
@@ -167,14 +172,8 @@ GROUPS: tuple[Group, ...] = (
         Column("h.snv_won", "Serve & volley won %", pair=True),
         Column("h.drop", "Drop shot freq %", pair=True),
     )),
-    Group("I", "Derived comparisons", (
-        Column("i.rank_gap", "Rank gap", "who is ranked better, by how much"),
-        Column("i.elo_gap", "Elo gap"),
-        Column("i.surface_gap", "Surface win-% gap", "percentage points on the match surface"),
-        Column("i.dr_gap", "DR gap", "dominance ratio, last-52w surface splits"),
-        Column("i.form_gap", "Form gap", "wins over last N"),
-        Column("i.h2h", "H2H", "record from P1's perspective"),
-    )),
+    # (group I, "Derived comparisons", was removed on request — the raw
+    #  columns it compared live in B / C / D / E / G)
     Group("J", "Point-by-point (last N)", (
         Column("j.gp_conv", "Game pts converted %", "pbp-points, mean over last N", pair=True),
         Column("j.bp_conv", "Break pts converted %", "pbp-points, mean over last N", pair=True),
@@ -264,17 +263,6 @@ def _pair(v1: Any, v2: Any) -> str:
             return str(int(v))
         return str(v)
     return f"{cell(v1)} | {cell(v2)}"
-
-
-def _gap(v1: Optional[float], v2: Optional[float], higher_better: bool,
-         fmt: str = "{:.0f}", unit: str = "") -> str:
-    if v1 is None or v2 is None:
-        return MISSING
-    if abs(v1 - v2) < 1e-9:
-        return "even"
-    p1_leads = (v1 > v2) if higher_better else (v1 < v2)
-    who = "P1" if p1_leads else "P2"
-    return f"{who} +{fmt.format(abs(v1 - v2))}{unit}"
 
 
 def _num_txt(value: Any) -> Optional[str]:
@@ -408,22 +396,84 @@ def _opp_rank(view: PlayerView, rows: list[list]) -> Optional[int]:
 
 _WEEKDAYS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
+# Winamax runs on the Paris clock: the day sections of the list ("demain",
+# "mar."), the kick-off times printed on the cards and the browser that scrapes
+# them are all Europe/Paris — that is the OFFICIAL calendar of a match. The
+# viewer's clock is a different thing: kick-offs are converted to it for display
+# (start_display), while the day header keeps the official date (day_label), so
+# a 23:00 Paris match stays under its official day even in UTC+8.
+OFFICIAL_TZ = ZoneInfo("Europe/Paris")
+
+
+def official_today() -> date:
+    """Today on the official (Europe/Paris) clock — never the machine's date."""
+    return datetime.now(OFFICIAL_TZ).date()
+
+
+def _scan_date(match: dict) -> Optional[date]:
+    """Paris date of the scan that captured the row's day indicator: that
+    indicator ("demain", "mar.", …) is relative to the day it was read on, so
+    anchoring to the scan keeps the official day right while rows sit stored."""
+    raw = match.get("scanned_at")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.astimezone()      # scanned_at is a naive datetime.now()
+    return moment.astimezone(OFFICIAL_TZ).date()
+
 
 def day_delta(match: dict) -> int:
-    """Days between today and the match (0 = today)."""
+    """Days between the scan day and the match (0 = the scan's own day)."""
+    ref = _scan_date(match) or official_today()
     ind = (match.get("day_indicator") or "").strip().lower().rstrip(".")
     if ind == "demain":
         return 1
     if ind in _WEEKDAYS:
-        return (_WEEKDAYS.index(ind) - date.today().weekday()) % 7
+        return (_WEEKDAYS.index(ind) - ref.weekday()) % 7
     return max(0, int(match.get("day_offset") or 0))
 
 
+def match_date(match: dict) -> date:
+    """Official (Europe/Paris) date of the match's day section — the grouping
+    key of the table, whatever the viewer's time zone says."""
+    return (_scan_date(match) or official_today()) + timedelta(days=day_delta(match))
+
+
 def day_label(match: dict) -> str:
-    """'Today (16/10/2026)' — the day header of the table and a copy field."""
-    delta = day_delta(match)
-    name = "Today" if delta == 0 else ("Tomorrow" if delta == 1 else f"+{delta}d")
-    return f"{name} ({(date.today() + timedelta(days=delta)).strftime('%d/%m/%Y')})"
+    """'Today (19/10/2026)' — the day header of the table and a copy field.
+    The name follows the official clock, the date is the official match day."""
+    day = match_date(match)
+    delta = (day - official_today()).days
+    if delta == 0:
+        name = "Today"
+    elif delta == 1:
+        name = "Tomorrow"
+    elif delta > 1:
+        name = f"+{delta}d"
+    else:
+        name = f"{delta}d"     # a stale row whose official day has already passed
+    return f"{name} ({day.strftime('%d/%m/%Y')})"
+
+
+def start_display(match: dict) -> str:
+    """Kick-off on the machine's clock: the card holds the Europe/Paris time of
+    match_date() ('in play' while live, raw text kept when it is not a clock)."""
+    if match.get("live"):
+        return "in play"
+    raw = str(match.get("start_local") or "").strip()
+    found = re.fullmatch(r"(\d{1,2}):(\d{2})", raw)
+    if not found:
+        return raw or MISSING
+    hour, minute = int(found.group(1)), int(found.group(2))
+    if hour > 23 or minute > 59:
+        return raw
+    moment = datetime.combine(match_date(match), time(hour, minute),
+                              tzinfo=OFFICIAL_TZ)
+    return moment.astimezone().strftime("%H:%M")
 
 
 def _surface_for_match(view: PlayerView, tournament: str) -> Optional[str]:
@@ -618,10 +668,7 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
     # ---- A: match ----
     values["a.tournament"] = match.get("tournament") or MISSING
     values["a.round"] = match.get("round") or "—"
-    if match.get("live"):
-        values["a.start"] = "in play"
-    else:
-        values["a.start"] = match.get("start_local") or MISSING
+    values["a.start"] = start_display(match)
     values["a.day"] = day_label(match)
     o1, o2 = match.get("odd_p1"), match.get("odd_p2")
     values["a.odds"] = _pair(o1, o2) if (o1 or o2) else MISSING
@@ -951,41 +998,6 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
                                split_record(v2, "Finals"))
     values["l.b5"] = _pair(split_record(v1, "Best of 5"),
                            split_record(v2, "Best of 5"))
-
-    # ---- I: derived ----
-    def prof_num(view: PlayerView, key: str) -> Optional[float]:
-        return _f(view.profile.get(key))
-
-    values["i.rank_gap"] = _gap(prof_num(v1, "current_rank"), prof_num(v2, "current_rank"),
-                                higher_better=False)
-    values["i.elo_gap"] = _gap(prof_num(v1, "elo_rating"), prof_num(v2, "elo_rating"),
-                               higher_better=True)
-
-    def surface_winpct(view: PlayerView, surf: Optional[str]) -> Optional[float]:
-        if not surf:
-            return None
-        row = view.split_row("career-splits", surf)
-        if not row:
-            return None
-        return _f(view.col("career-splits", row, "Win%", fallback=5))
-
-    values["i.surface_gap"] = _gap(
-        surface_winpct(v1, surface1), surface_winpct(v2, surface2),
-        higher_better=True, fmt="{:.1f}", unit="pp")
-
-    def dr52(view: PlayerView) -> Optional[float]:
-        row = view.split_row("last52-splits", surface or "Hard")
-        if row is None:
-            rows = view.rows("last52-splits")
-            row = rows[0] if rows else None
-        return _f(view.col("last52-splits", row, "DR", fallback=22)) if row else None
-
-    values["i.dr_gap"] = _gap(dr52(v1), dr52(v2), higher_better=True, fmt="{:.2f}")
-    values["i.form_gap"] = _gap(
-        _f(f1.get("record", "").split("-")[0]) if f1.get("record") not in (None, MISSING) else None,
-        _f(f2.get("record", "").split("-")[0]) if f2.get("record") not in (None, MISSING) else None,
-        higher_better=True, fmt="{:.0f}", unit=" wins")
-    values["i.h2h"] = values["g.record"]
 
     status = {}
     for side, view in (("p1", v1), ("p2", v2)):

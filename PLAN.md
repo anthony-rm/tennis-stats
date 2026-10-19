@@ -168,8 +168,11 @@ Groups with select-all headers; each column = one checkbox per match row.
 **H. Advanced (tables `mcp-serve`, `mcp-return`, `mcp-rally`, `mcp-tactics` — optional)**
 `Serve patterns | Return patterns | Rally length | Tactical notes`
 
-**I. Derived comparisons (computed in Python, one column, both players)**
-`Rank gap | Elo gap | Surface win-% gap | DR gap | Form gap (last 10) | H2H`
+**I. Derived comparisons** — *removed on request (2026-10-19, §11): the six
+computed gap columns (Rank / Elo / Surface win-% / DR / Form / H2H) and their
+*Derived* quick-select chip are gone; the raw values they compared live in
+B / C / D / E / G. The letter I stays unused so every other column id keeps
+its identity.*
 
 Winamax's own match page also renders `Forme actuelle`, `Rang`, `Surface`, `Météo`, `Parcours` panels — captured in the same odds pass as a free fallback when Tennis Abstract resolution fails.
 
@@ -288,3 +291,16 @@ Under
 | All days by default | Day filter removed — every match the scan finds is listed, grouped by day. |
 | Remove *Implied %* | `a.pct` dropped: 136 → **133 columns**. |
 | Housekeeping | Count reads `selected/shown matches · cells · cols`; page-level vertical overflow removed (table height = `100vh − header − 34px`). |
+
+## 11. Update (2026-10-19) — local clock, official day, *Derived* removed
+
+`pytest tests/ -q` → **38 passed**; behaviour verified live on `127.0.0.1:8001`
+(in Chrome: day-label box x = 17 and text x = 27 for every `scrollLeft` from 0
+to 900).
+
+| Request | Implementation |
+|---|---|
+| Kick-off times on the viewer's clock | Winamax cards carry **Europe/Paris** times (`OFFICIAL_TZ`, browser context `timezone_id="Europe/Paris"`). New `start_display(match)` converts the Paris `HH:MM` of `match_date()` with `datetime.astimezone()` → the machine's zone: it feeds `a.start`, the row summary (`start_display` next to `start_local` in `/api/matches` `raw`) and the sort key `timeKey()`. Live stays `in play`, non-clock text is passed through, never invented. |
+| Group by the **official** day, not the local date | `day_label()` anchored on `date.today()` (machine clock) while the `demain` / `mar.` indicator is Paris-relative — between 00:00 and 05:59 local the header date was off by one. New `match_date()` = Paris date of the scan (`scanned_at`) + indicator / day-offset delta, and `official_today()` = `datetime.now(OFFICIAL_TZ).date()` for the Today / Tomorrow / +Nd name, so stored rows keep the official day until the next scan (the 22 rows read as *Demain* on 18/10 now show `Today (19/10/2026)` on 19/10). |
+| *Today / Tomorrow* still moved on horizontal scroll | The label was sticky at its pin position while its natural spot was 10 px right (the day `<td>` kept `padding-left: 10px`), so it slid during the first 10 px of scroll and then sat 10 px left of the frozen Match column. Fix: `tbody tr.day-row td { padding: 6px 0 }` and the inset moved onto `.day-cell` (`padding: 0 18px 0 10px`) — box pinned at x = 17, text at x = 27 (the Match column's text x) for every scroll offset. |
+| Remove *Derived* | Group I dropped from the catalogue (the `_gap` helper and the whole `i.*` block go with it) → 133 → **127 columns**, 11 groups (the letter I stays unused so other ids keep their identity); the *Derived* chip is gone; `QUICK.stats` = every non-A group; `pruneSelection()` also drops boxes on columns the catalogue no longer lists (stored selections keep working); the exporter's reading guide lost its gap-fields line. H2H itself stays in group G. |

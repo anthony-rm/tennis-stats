@@ -155,15 +155,20 @@
      (never-scrolling) cell instead of the grid */
   tbody tr.day-row td {
     background: var(--bg); border-bottom: 1px solid var(--border);
-    border-top: 1px solid var(--border); padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    /* no left padding: the sticky label must start exactly where it gets pinned,
+       or it slides (by the padding) during the first pixels of a side scroll */
+    padding: 6px 0;
     overflow: visible;
   }
   /* the "Today / Tomorrow" label stays pinned to the left edge while the
-     grid scrolls sideways (sticky inside the full-width day row) */
+     grid scrolls sideways (sticky inside the full-width day row): its box is
+     at the pin position from scroll 0, and the 10px inset comes from the cell
+     itself, so the text never moves and stays aligned with the Match column */
   tbody tr.day-row .day-cell {
     display: inline-flex; align-items: center; gap: 10px;
     position: sticky; left: 0; z-index: 5;
-    background: var(--bg); padding-right: 18px;
+    background: var(--bg); padding: 0 18px 0 10px;
     box-shadow: 1px 0 0 var(--border);
   }
   tbody tr.day-row .day-label {
@@ -268,8 +273,6 @@
             title="1X2 odds, total games, games spread (off by default)">Odds</button>
     <button class="quick" data-quick="stats" aria-pressed="false"
             title="Every Tennis Abstract column — identity, form, surface, season, H2H, advanced, point-by-point, rankings (off by default)">Player statistics</button>
-    <button class="quick" data-quick="derived" aria-pressed="false"
-            title="Computed comparison columns: rank / Elo / surface / DR / form / H2H gaps">Derived</button>
     <span class="sep"></span>
     <button id="btn-none" title="Clear every checked box (the selected matches stay selected)">Clear cells</button>
     <span class="spacer"></span>
@@ -326,8 +329,7 @@ const state = {
 const QUICK = {
   match: ["a.tournament", "a.round", "a.start", "a.day"],
   odds: ["a.odds", "a.games", "a.spread"],
-  derived: null,   // group I, filled once the catalogue is loaded
-  stats: null,     // every non-A / non-I group, filled once loaded
+  stats: null,     // every non-A group, filled once the catalogue is loaded
 };
 
 const $ = (id) => document.getElementById(id);
@@ -439,7 +441,7 @@ function dayDateKey(r) {
 function timeKey(r) {
   const meta = state.rawById.get(r.match_id) || {};
   if (r.live) return -1;                                  // in play first
-  const t = meta.start_local || "";
+  const t = meta.start_display || meta.start_local || "";   // the clock as shown
   return /^\d{1,2}:\d{2}$/.test(t) ? parseInt(t.split(":")[0], 10) * 60 +
        parseInt(t.split(":")[1], 10) : 9999;
 }
@@ -480,10 +482,16 @@ function setCell(mid, col, on) {
   }
 }
 
-/* Cells for matches that no longer exist (pruned by a re-scan) are dead weight. */
+/* Cells for matches that no longer exist (pruned by a re-scan) are dead weight;
+   so are boxes on columns the catalogue no longer lists (removed groups). */
 function pruneSelection() {
   const ids = new Set(state.rows.map((r) => r.match_id));
-  for (const mid of [...state.selection.keys()]) if (!ids.has(mid)) state.selection.delete(mid);
+  const known = new Set(state.columns.map((c) => c.id));
+  for (const mid of [...state.selection.keys()]) {
+    const set = state.selection.get(mid);
+    if (!ids.has(mid)) { state.selection.delete(mid); continue; }
+    if (known.size) for (const col of [...set]) if (!known.has(col)) set.delete(col);
+  }
 }
 function pruneLines() {
   const ids = new Set(state.rows.map((r) => r.match_id));
@@ -533,9 +541,7 @@ function persistSelection() {
 
 /* --------------------- quick-select presets ---------------------------- */
 function quickCols(key) {
-  if (key === "match" || key === "odds") return QUICK[key];
-  if (key === "derived") return QUICK.derived || [];
-  if (key === "stats") return QUICK.stats || [];
+  if (key === "match" || key === "odds" || key === "stats") return QUICK[key] || [];
   return [];
 }
 
@@ -563,10 +569,8 @@ function refreshQuick() {
 }
 
 function buildQuickSets() {
-  QUICK.derived = (state.groups.find((g) => g.id === "I") || {columns: []})
-    .columns.map((c) => c.id);
   QUICK.stats = state.groups
-    .filter((g) => g.id !== "A" && g.id !== "I")
+    .filter((g) => g.id !== "A")
     .flatMap((g) => g.columns.map((c) => c.id));
 }
 
@@ -812,7 +816,9 @@ function matchFragment(r, specs) {
   });
   const txt = document.createElement("div");
   txt.className = "match-text";
-  const metaParts = [meta.tournament, meta.round, meta.start_local, r.live ? "in play" : ""]
+  const startText = meta.start_display || meta.start_local || "";
+  const metaParts = [meta.tournament, meta.round, startText,
+                     r.live && startText !== "in play" ? "in play" : ""]
     .filter((p) => p !== undefined && p !== null && String(p).trim() !== "");
   txt.innerHTML =
     `<div class="match-name">${esc(r.player1)} vs ${esc(r.player2)}${badges.join("")}</div>` +
@@ -1270,6 +1276,7 @@ $("btn-copy-list").addEventListener("click", async () => {
 (async function boot() {
   try {
     await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches(), loadVersion()]);
+    pruneSelection();   // the catalogue is complete now: drop removed columns
     state.loadedOnce = true;
     maybeApplyDefaultSelection();
     render();

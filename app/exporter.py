@@ -36,7 +36,6 @@ _GUIDE = (
     " (first player = first named in the match line);",
     '- "—" means not available (stats not fetched, player unresolved, or absent'
     " on Tennis Abstract);",
-    '- fields named "… gap" say which named player leads;',
     "- section headings (###) are the dashboard's column groups.",
 )
 

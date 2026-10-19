@@ -92,12 +92,15 @@ async def get_matches(form_n: int = Query(10, ge=2, le=50)) -> dict:
         "form_n": form_n,
         "stats_present": sorted(stats.keys()),
         "raw": [
-            {k: m.get(k) for k in (
+            {**{k: m.get(k) for k in (
                 "match_id", "tournament", "round", "player1", "player2",
                 "start_local", "day_offset", "day_indicator", "live",
                 "odd_p1", "odd_p2", "pct_p1", "pct_p2", "url",
                 "odds_fetched_at", "section_count", "odd_count", "market_count",
-            )}
+            )},
+             # kick-off on the viewer's clock (start_local stays the Paris raw
+             # value) — shown in the row summary of the grid
+             "start_display": columns_mod.start_display(m)}
             for m in matches
         ],
     }

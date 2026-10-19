@@ -10,7 +10,8 @@ A local web dashboard that, every time it starts:
    the `Nombre de jeux` (total games) and `Écart de jeux` (games spread) ladders,
 3. fetches **Tennis Abstract player stats** for every player found,
 4. shows one big table — **two rows per match** (top = first player, bottom =
-   second) × **133 data columns** in 12 groups (A–L), grouped by day, with a
+   second) × **127 data columns** in 11 groups (A–L, without I), grouped by the
+   official match day and showing kick-off times on **your own clock**, with a
    checkbox per cell (every Winamax odd line also carries a 🎾 **copy**
    button that puts the French *ANALYSE DU JOUR* template on the clipboard),
 5. copies the selected cells to the clipboard as **LLM-friendly structured text**
@@ -122,7 +123,7 @@ tennisabstract.com.
              ▼
 [stats]  core/tennisabstract.py → jsfrags/<Id>.js + player page → 24 h cache
              ▼
-[table]  app/columns.py computes all 133 columns → app/store.py (SQLite)
+[table]  app/columns.py computes all 127 columns → app/store.py (SQLite)
              ▼
 [copy]   app/exporter.py → LLM / TSV / Markdown / Markdown-block / JSON → clipboard
 ```
@@ -241,7 +242,15 @@ tests verify it parses (`node --check`) and is up to date.
   pair values are split instead of being joined with `P1 | P2`; the copy
   formats keep the `P1 | P2` convention for rectangular exports.
 * `—` = unknown (stats not fetched, player unresolved, table absent on TA).
-* Gap columns say who leads: `P1 +5`, `P2 +0.15`, `even`, `never` (no meetings).
+* **Time & day**: Winamax's cards hold **Europe/Paris** kick-offs and day
+  sections (`demain`, `mar.`, …) — the official calendar of a match.
+  `a.start` is converted to **the machine's time zone** for the row summary,
+  the *Start time* copy field and sorting, while the day header keeps the
+  **official match day** (`Today (19/10/2026)`), never the date in the
+  viewer's zone: a 23:00 Paris match stays under its official day even in
+  UTC+8. The official date is anchored to the Paris date of the scan that
+  read the indicator (`scanned_at`), so stored rows keep the right day until
+  the next scan.
 * Group C averages over the last **N** matches (toolbar selector, default 10);
   `c.bps` is summed (`19/27`), `c.last_*` is the latest match.
 * Group D uses the **inferred match surface**: the exact event row when the
@@ -288,7 +297,7 @@ formats (TSV), keeping them pasteable into Excel.
 ```
 
 Player pairs are written as `<player> <value>, <player> <value>` (no ambiguous
-`a | b`), gap columns name the leading player, `—` marks missing data, and a
+`a | b`), `—` marks missing data, and a
 short reading guide opens the paste. The chosen format is remembered per
 browser (`localStorage`), the LLM format is the initial default.
 
@@ -310,7 +319,7 @@ browser (`localStorage`), the LLM format is the initial default.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 37 tests, offline (fixtures)
+.venv/bin/python -m pytest tests/ -q      # 38 tests, offline (fixtures)
 ```
 
 * `tests/test_winamax_core.py` — selector regression against real DOM snapshots

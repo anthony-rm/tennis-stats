@@ -5,7 +5,7 @@ Uses frozen real payloads (tests/fixtures/player_*.json) — no network.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,25 +51,28 @@ def stats() -> dict:
 # ------------------------------------------------------------- catalogue ---
 def test_catalogue_shape():
     ids = col.COLUMN_ORDER
-    assert len(ids) == 133
+    assert len(ids) == 127
     assert len(set(ids)) == len(ids), "column ids must be unique"
-    assert [g.id for g in col.GROUPS] == list("ABCDEFGHIJKL")
+    assert [g.id for g in col.GROUPS] == list("ABCDEFGHJKL")
     # removed on request: no URL / market-count / implied % / main-line odds,
-    # no "Events & finals" group
+    # no "Events & finals" group, no derived comparison group
     for gone in ("a.url", "a.market_count", "a.pct", "a.games_ladder", "a.spread_ladder"):
         assert gone not in col.COLUMNS, gone
     assert not any("Events" in g.label for g in col.GROUPS)
     assert not any(cid.startswith("l.ev") for cid in col.COLUMNS)
-    # hidden columns are still copyable but are not drawn as grid columns
-    hidden = {c.id for c in col.COLUMNS.values() if c.hidden}
-    assert hidden == {"a.tournament", "a.round", "a.start", "a.day"}, hidden
+    assert not any(cid.startswith("i.") for cid in col.COLUMNS)
+    assert not any("Derived" in g.label for g in col.GROUPS)
+    assert not any("gap" in c.label.lower() for c in col.COLUMNS.values())
     assert not any(c.hidden for g in col.GROUPS if g.id != "A" for c in g.columns)
     for g in col.GROUPS:
         assert g.columns, g.id
     # every group from PLAN.md §6 exists
     labels = {g.label for g in col.GROUPS}
     assert any("Match" in l for l in labels)
-    assert any("Derived" in l for l in labels)
+    assert any("Head-to-head" in l for l in labels)
+    # hidden columns are still copyable but are not drawn as grid columns
+    hidden = {c.id for c in col.COLUMNS.values() if c.hidden}
+    assert hidden == {"a.tournament", "a.round", "a.start", "a.day"}, hidden
 
 
 # -------------------------------------------------------- compute_values ----
@@ -146,8 +149,12 @@ def test_match_columns(stats):
     v = col.compute_values(MATCH, stats)["values"]
     assert v["a.tournament"] == "ATP - Shanghai"
     assert v["a.round"] == "1/4"
-    assert v["a.start"] == "12:00"
-    assert v["a.day"] == f"Today ({date.today().strftime('%d/%m/%Y')})"
+    # kick-off: Paris 12:00 of the official match day, on this machine's clock
+    paris_noon = datetime.combine(col.match_date(MATCH), time(12, 0),
+                                  tzinfo=col.OFFICIAL_TZ)
+    assert v["a.start"] == paris_noon.astimezone().strftime("%H:%M")
+    # day header: official date (Paris today here — MATCH is a same-day row)
+    assert v["a.day"] == f"Today ({col.official_today().strftime('%d/%m/%Y')})"
     assert v["a.odds"] == "1.5 | 2.5"
     assert "a.pct" not in v
     # a.games / a.spread stay empty until the odds pass ran
@@ -198,15 +205,35 @@ def test_surface_inference_and_splits(stats):
         assert side.count("-") == 1
         w, l = side.split("-")
         assert w.isdigit() and l.isdigit()
-    assert v["i.surface_gap"].split(" ")[0] in {"P1", "P2", "even"}
 
 
-def test_derived_gaps(stats):
-    v = col.compute_values(MATCH, stats)["values"]
-    assert v["i.rank_gap"] == "P1 +1"        # rank 8 vs 9, lower is better
-    assert v["i.elo_gap"] == "P2 +25"        # 2074 vs 2099, higher is better
-    assert v["i.form_gap"].endswith("wins") or v["i.form_gap"] == "even"
-    assert v["i.h2h"] in {"never"} or "-" in v["i.h2h"]
+def test_start_time_runs_on_the_local_clock():
+    """Europe/Paris kick-off converted to the viewer's zone; 'in play' while live."""
+    paris_noon = datetime.combine(col.match_date(MATCH), time(12, 0),
+                                  tzinfo=col.OFFICIAL_TZ)
+    assert col.start_display(MATCH) == paris_noon.astimezone().strftime("%H:%M")
+    assert col.start_display(dict(MATCH, live=1)) == "in play"
+    # unreadable / missing clock text is never invented
+    assert col.start_display(dict(MATCH, start_local=None)) == "—"
+    assert col.start_display(dict(MATCH, start_local="14:75")) == "14:75"
+    assert col.start_display(dict(MATCH, start_local="in progress")) == "in progress"
+
+
+def test_day_groups_by_official_day_not_by_local_date():
+    """The day indicator is read on the scan day (Paris), so a stored row keeps
+    its official date whatever the machine's clock or time zone says."""
+    scan = dict(MATCH, scanned_at="2026-10-18T08:00:00")
+    assert col.match_date(scan) == date(2026, 10, 18)                # same day
+    assert col.match_date(dict(scan, day_indicator="demain")) == date(2026, 10, 19)
+    # Sunday 18/10 + "mar." = Tuesday 20/10 (weekday maths anchored on the scan)
+    assert col.match_date(dict(scan, day_indicator="mar.")) == date(2026, 10, 20)
+    assert col.match_date(dict(scan, day_offset=3)) == date(2026, 10, 21)
+    # the printed date is the official one, the name follows the official clock
+    label = col.day_label(dict(scan, day_indicator="demain"))
+    assert label.endswith("(19/10/2026)")
+    delta = (date(2026, 10, 19) - col.official_today()).days
+    assert label.split(" (")[0] == ("Today" if delta == 0 else
+                                    "Tomorrow" if delta == 1 else f"{delta}d")
 
 
 def test_h2h_against_known_opponent(stats):
@@ -214,7 +241,7 @@ def test_h2h_against_known_opponent(stats):
     v = col.compute_values(m, stats)["values"]
     assert v["g.record"] == "31-29"
     assert v["g.last"] == "2024"
-    assert v["i.h2h"] == "31-29"
+    assert v["g.meetings"] != "—"
 
 
 def test_unresolved_and_missing_players():
@@ -239,11 +266,12 @@ def test_live_and_day_labels():
     v = col.compute_values(m, {})["values"]
     assert v["a.start"] == "in play"
     fmt = "%d/%m/%Y"
+    today = col.official_today()
     assert col.day_label({"day_indicator": "demain"}) == \
-        f"Tomorrow ({(date.today() + timedelta(days=1)).strftime(fmt)})"
-    assert col.day_label({"day_offset": 0}) == f"Today ({date.today().strftime(fmt)})"
+        f"Tomorrow ({(today + timedelta(days=1)).strftime(fmt)})"
+    assert col.day_label({"day_offset": 0}) == f"Today ({today.strftime(fmt)})"
     assert col.day_label({"day_offset": 3}) == \
-        f"+3d ({(date.today() + timedelta(days=3)).strftime(fmt)})"
+        f"+3d ({(today + timedelta(days=3)).strftime(fmt)})"
 
 
 def test_outcome_detection():
@@ -295,7 +323,7 @@ def test_export_markdown_and_blocks():
 
 def test_export_llm_format(stats):
     rows = col.build_rows([dict(MATCH, odds_json=ODDS_JSON)], stats, form_n=10)
-    cells = {"75620252": ["a.tournament", "a.games", "b.rank", "i.rank_gap"]}
+    cells = {"75620252": ["a.tournament", "a.games", "b.rank"]}
     text = export_text(rows, cells, "llm")
     lines = text.splitlines()
 
@@ -305,16 +333,15 @@ def test_export_llm_format(stats):
     # fields grouped under the catalogue groups, in catalogue order
     groups = [ln for ln in lines if ln.startswith("### ")]
     assert groups == ["### A. Match (Winamax)",
-                      "### B. Player identity (Tennis Abstract)",
-                      "### I. Derived comparisons"], groups
+                      "### B. Player identity (Tennis Abstract)"], groups
     # one labelled line per field; pairs expanded with real player names
     assert "- Tournament: ATP - Shanghai" in lines
     # newlines are flattened by _clean(): one "Over X: odd" run, then Under
     assert ("- Total games: Over 21.5: 1.54 Over 22.5: 1.78 Over 23.5: 1.98  "
             "Under 21.5: 2.00 Under 22.5: 1.78 Under 23.5: 1.58") in lines
     assert "- Current rank: Novak Djokovic 8, Iga Swiatek 9" in lines
-    # gap columns name the leading player instead of "P1"/"P2"
-    assert "- Rank gap: Novak Djokovic +1" in lines
+    # the removed "Derived comparisons" group never leaks into an export
+    assert "Rank gap" not in text and "Elo gap" not in text
     # only selected fields are exported (no tables, no unselected data)
     assert "Season W-L" not in text
     assert "| Current rank |" not in text
