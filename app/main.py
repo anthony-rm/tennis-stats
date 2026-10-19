@@ -17,6 +17,7 @@ Endpoints
     GET  /api/selections       saved selection (cells + format)
     POST /api/selections       save selection
     POST /api/export           selection -> text (llm | tsv | md | md_block | json)
+    POST /api/clear            drop downloaded rows + the player cache
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app import columns as columns_mod
 from app.exporter import FORMATS, export_text
 from app.jobs import JobBusy, JobManager
-from app.paths import app_version, asset_dir, cache_dir
+from app.paths import app_version, asset_dir, cache_dir, clear_cache
 from app.store import Store
 
 WEB_INDEX = asset_dir() / "web" / "index.html"
@@ -211,3 +212,21 @@ async def post_export(body: dict = Body(...)) -> dict:
     return {"text": text, "chars": len(text),
             "columns": len({c for v in cells.values() for c in v}),
             "rows": sum(1 for v in cells.values() if v)}
+
+
+# -------------------------------------------------------------- cleanup ---
+@app.post("/api/clear")
+async def post_clear() -> dict:
+    """Delete the downloaded data (matches, odds, stats) and the player cache.
+
+    Selections (the user's own cells / copy format) are never touched, and a
+    running job makes it a 409: a scrape writing while we delete would race
+    the very rows it is storing.
+    """
+    if any(jobs.is_running(kind) for kind in ("scan", "odds", "stats")):
+        raise HTTPException(409, "a fetch is running — wait for it to finish")
+    cache = clear_cache(CACHE_DIR)
+    counts = store.clear_downloaded()
+    return {"matches": counts["matches"], "stats": counts["stats"],
+            "cache_files": cache["files"], "cache_bytes": cache["bytes"],
+            "failed": cache["failed"]}

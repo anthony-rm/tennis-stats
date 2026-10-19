@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from app import columns as col
+from app import paths
 from app.exporter import export_text
 from app.store import Store
 
@@ -407,3 +408,39 @@ def test_store_stats_and_selection(tmp_path):
     s.save_selection({"m2": ["b.rank"]}, "tsv")   # upsert by name
     assert s.get_selection()["cells"] == {"m2": ["b.rank"]}
     s.close()
+
+
+def test_store_clear_downloaded_keeps_selection(tmp_path):
+    """'Clear data' removes what was fetched, never the user's own choices."""
+    s = Store(tmp_path / "t.db")
+    s.upsert_matches([MATCH, dict(MATCH, match_id="9", player1="A", player2="B")])
+    s.set_odds(MATCH["match_id"], {"sectionCount": 3, "oddCount": 42,
+                                   "buttonCount": 44, "sections": []})
+    s.upsert_stats("Novak Djokovic", DJOKOVIC)
+    s.save_selection({"75620252": ["a.tournament"]}, "llm")
+
+    assert s.clear_downloaded() == {"matches": 2, "stats": 1}
+    assert s.list_matches() == []
+    assert s.get_stats() == {}
+    assert s.matches_needing_odds() == []
+    sel = s.get_selection()
+    assert sel["cells"] == {"75620252": ["a.tournament"]}
+    assert sel["format"] == "llm"
+    # idempotent: a second clear reports nothing left
+    assert s.clear_downloaded() == {"matches": 0, "stats": 0}
+    s.close()
+
+
+def test_clear_cache_removes_the_tree_but_keeps_the_directory(tmp_path):
+    day = tmp_path / "2026-10-19"
+    day.mkdir()
+    (day / "djokovic.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "swiatek.json").write_text("0123456789", encoding="utf-8")
+
+    out = paths.clear_cache(tmp_path)
+    assert out == {"files": 2, "bytes": 12, "failed": 0}
+    # the cache root survives (the job manager holds its path), the day
+    # subdirectories are gone with their payloads
+    assert tmp_path.is_dir()
+    assert list(tmp_path.rglob("*")) == []
+    assert paths.clear_cache(tmp_path) == {"files": 0, "bytes": 0, "failed": 0}

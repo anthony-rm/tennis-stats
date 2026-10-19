@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_DATA_DIR = "TENNIS_STATS_DATA_DIR"
@@ -32,6 +33,38 @@ def log_dir() -> Path:
     path = data_dir() / "logs"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def clear_cache(path: Optional[Path] = None) -> dict:
+    """Delete every cached download (the per-player Tennis Abstract JSON tree).
+
+    The cache directory itself is kept — ``JobManager`` holds its path — but
+    the day subdirectories (``<cache>/2026-10-19/*.json``) are removed once
+    empty. Returns ``{"files", "bytes", "failed"}``; a file that cannot be
+    unlinked is counted, never raised (one busy file must not abort the rest).
+    """
+    root = Path(path) if path is not None else cache_dir()
+    files = total = failed = 0
+    for item in sorted(root.rglob("*")):
+        if not item.is_file():
+            continue
+        try:
+            size = item.stat().st_size
+            item.unlink()
+        except OSError:
+            failed += 1
+            continue
+        files += 1
+        total += size
+    # drop the now-empty day directories, deepest first
+    for item in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if item.is_dir():
+            try:
+                item.rmdir()
+            except OSError:
+                pass
+    return {"files": files, "bytes": total, "failed": failed}
+
 
 def asset_dir() -> Path:
     """Directory holding bundled read-only files (web UI, userscript core).

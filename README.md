@@ -107,7 +107,11 @@ jobs with live progress via SSE):
 * **↻ Refresh odds** — re-fetch the odds of every match, *including the ones
   already shown*, because the odds move during the day;
 * **Fetch stats** — every player of the list still missing Tennis Abstract
-  data (already stored players are skipped, stored fetch errors are retried).
+  data (already stored players are skipped, stored fetch errors are retried);
+* **Clear data** — deletes every downloaded match / odd / player stat plus
+  the cached player pages on disk (confirmed first, disabled while a job
+  runs); the selection and copy format are kept, and the grid comes back
+  with the next scan.
 
 The grid fills in **live**: each stored match / player pushes a `data` event
 on the SSE stream and the table reloads (throttled) while the job is still
@@ -336,6 +340,7 @@ browser (`localStorage`), the LLM format is the initial default.
 | GET | `/api/scan/stream` | SSE events: job progress + `{"type":"data"}` per stored row (live grid) |
 | GET/POST | `/api/selections` | load/save the cell selection |
 | POST | `/api/export` | `{cells, format, form_n?}` → `{text, chars, rows, columns}` — `format` ∈ `llm` (default) `tsv` `md` `md_block` `json` |
+| POST | `/api/clear` | drop the downloaded rows (matches, odds, stats) + the player cache → `{matches, stats, cache_files, cache_bytes, failed}`; selections untouched, `409` while a job runs |
 
 ## Tests
 

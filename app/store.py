@@ -189,6 +189,25 @@ class Store:
                 continue
         return out
 
+    # ----------------------------------------------------------- clear ----
+    def clear_downloaded(self) -> dict:
+        """Drop every downloaded row (scan result, odds, stored player stats).
+
+        The store half of the dashboard's "Clear data": selections are the
+        user's own choices, never downloads, so they are kept untouched.
+        Returns the removed row counts (``{"matches", "stats"}``).
+        """
+        with self._conn:
+            matches = self._conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+            stats = self._conn.execute("SELECT COUNT(*) FROM stats").fetchone()[0]
+            self._conn.execute("DELETE FROM matches")
+            self._conn.execute("DELETE FROM stats")
+        try:
+            self._conn.execute("VACUUM")   # hand the file space back
+        except sqlite3.OperationalError:
+            pass
+        return {"matches": matches, "stats": stats}
+
     # ------------------------------------------------------ selections ---
     def get_selection(self, name: str = "default") -> Optional[dict]:
         cur = self._conn.execute(

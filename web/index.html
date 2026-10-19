@@ -84,6 +84,7 @@
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.1); }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
   input[type="search"] { min-width: 210px; padding: 0 10px; }
   select { padding: 0 8px; }
   input[type="search"]::placeholder { color: var(--muted); }
@@ -261,6 +262,8 @@
     <button id="btn-odds" title="Extract every market for every match that still has no odds — the whole list, not only the selected lines (live matches skipped)">Fetch odds</button>
     <button id="btn-odds-refresh" title="Re-fetch the odds of every match, even the ones already shown — the odds move during the day, so this always pulls the current values (live matches skipped)">↻ Refresh odds</button>
     <button id="btn-stats" title="Fetch Tennis Abstract stats for every player still missing them — the whole list, not only the selected lines">Fetch stats</button>
+    <button class="danger" id="btn-clear"
+            title="Delete every downloaded match, odd and player stat, plus the cached player pages — your selection and copy format are kept (disabled while a fetch runs)">Clear data</button>
     <span class="spacer"></span>
     <input type="search" id="search" placeholder="Search player / tournament…" aria-label="Search matches">
     <label class="inline"><input type="checkbox" id="hide-live"> hide live</label>
@@ -1068,6 +1071,7 @@ function renderJobs() {
   $("btn-odds").disabled = busy("odds") || busy("scan");
   $("btn-odds-refresh").disabled = busy("odds") || busy("scan");
   $("btn-stats").disabled = busy("stats");
+  $("btn-clear").disabled = busy("scan") || busy("odds") || busy("stats");
 }
 
 /* ---------------------------- data loading ------------------------------ */
@@ -1213,6 +1217,30 @@ $("btn-odds-refresh").addEventListener("click", () => {
 
 $("btn-stats").addEventListener("click", () =>
   post("/api/stats", {}, "Fetching missing player stats…"));
+
+/* "Clear data": wipes what was downloaded (matches, odds, stats) and the TA
+   cache on disk; the selection / copy format are kept. Confirmed first — the
+   grid only comes back with a new scan (or the auto-scan on next start). */
+$("btn-clear").addEventListener("click", async () => {
+  const ok = confirm(
+    "Delete every downloaded match, odd and player stat, plus the cached " +
+    "player pages?\n\nYour selection and copy format are kept — the grid " +
+    "stays empty until the next scan.");
+  if (!ok) return;
+  try {
+    const d = await api("/api/clear", {method: "POST", body: "{}"});
+    const mb = (d.cache_bytes || 0) / 1048576;
+    toast(`Cleared ${d.matches} match${d.matches === 1 ? "" : "es"}, ` +
+          `${d.stats} player stat${d.stats === 1 ? "" : "s"} and ` +
+          `${d.cache_files} cached file${d.cache_files === 1 ? "" : "s"}` +
+          (mb >= 0.05 ? ` (${mb.toFixed(1)} MB)` : "") +
+          (d.failed ? `, ${d.failed} could not be removed` : ""));
+    await loadMatches().catch(() => {});
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+  await loadJobs().catch(() => {});
+});
 
 $("search").addEventListener("input", (e) => { state.search = e.target.value; renderBody(); updateCount(); });
 $("hide-live").addEventListener("change", (e) => { state.hideLive = e.target.checked; renderBody(); updateCount(); });
