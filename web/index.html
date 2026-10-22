@@ -814,9 +814,9 @@ function matchFragment(r, specs) {
   if (r.live) badges.push('<span class="badge live">LIVE</span>');
   if (r.has_odds) badges.push('<span class="badge odds">odds</span>');
   const st = r.stats_status || {};
-  if (st.p1 === "ok" && st.p2 === "ok") badges.push('<span class="badge ta-ok">TA</span>');
-  else if (["missing", "unresolved", "error"].some((s) => st.p1 === s || st.p2 === s))
-    badges.push('<span class="badge ta-warn" title="Tennis Abstract data missing for at least one player (not fetched yet, fetch failed, or not on TA) — press Fetch stats">TA?</span>');
+      if (st.p1 === "ok" && st.p2 === "ok") badges.push('<span class="badge ta-ok">TA</span>');
+      else if (["missing", "unresolved", "error", "parse"].some((s) => st.p1 === s || st.p2 === s))
+        badges.push('<span class="badge ta-warn" title="Tennis Abstract data missing for at least one player (not fetched yet, fetch failed, not on TA, or a table could not be read) — press Fetch stats">TA?</span>');
   const line = document.createElement("div");
   line.className = "match-line";
   const rowCb = document.createElement("input");
@@ -1111,6 +1111,10 @@ async function loadMatches() {
   initLines();
   maybeApplyDefaultSelection();
   render();
+  if (data.row_errors) {
+    const n = Object.keys(data.row_errors).length;
+    toast(`${n} match${n === 1 ? "" : "es"} could not be computed — see the TA? badge`, true);
+  }
 }
 
 async function loadColumns() {

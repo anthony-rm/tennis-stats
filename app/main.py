@@ -92,11 +92,12 @@ async def get_columns() -> dict:
 async def get_matches(form_n: int = Query(10, ge=2, le=50)) -> dict:
     matches = store.list_matches()
     stats = store.get_stats()
-    rows = columns_mod.build_rows(matches, stats, form_n=form_n)
+    rows, row_errors = columns_mod.build_rows(matches, stats, form_n=form_n)
     return {
         "matches": rows,
         "form_n": form_n,
         "stats_present": sorted(stats.keys()),
+        "row_errors": row_errors,
         "raw": [
             {**{k: m.get(k) for k in (
                 "match_id", "tournament", "round", "player1", "player2",
@@ -229,7 +230,7 @@ async def post_export(body: dict = Body(...)) -> dict:
     form_n = int(body.get("form_n") or 10)
     matches = store.list_matches()
     stats = store.get_stats()
-    rows = columns_mod.build_rows(matches, stats, form_n=form_n)
+    rows, _ = columns_mod.build_rows(matches, stats, form_n=form_n)
     text = export_text(rows, cells, fmt)
     return {"text": text, "chars": len(text),
             "columns": len({c for v in cells.values() for c in v}),

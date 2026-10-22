@@ -266,6 +266,28 @@ def _pair(v1: Any, v2: Any) -> str:
     return f"{cell(v1)} | {cell(v2)}"
 
 
+def _safe_dict(fn) -> tuple[dict, bool]:
+    """Run a per-player computation; on any exception return ({}, True).
+
+    A single malformed player payload (a partial TA fetch, a layout change,
+    a table whose rows are not rows) must degrade that player to "—" plus
+    an `error` status instead of crashing the whole match row — and through
+    it the /api/matches endpoint and the dashboard.
+    """
+    try:
+        return fn(), False
+    except Exception:
+        return {}, True
+
+
+def _safe_val(fn, default=None):
+    """Run a scalar computation; on exception return (default, True)."""
+    try:
+        return fn(), False
+    except Exception:
+        return default, True
+
+
 def _num_txt(value: Any) -> Optional[str]:
     """2028.0 -> '2028', 1.31 -> '1.31', '71.4%' -> '71.4'."""
     if value is None or value == "":
@@ -720,7 +742,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
             "opp_rank": _opp_rank(view, rows),
         }
 
-    f1, f2 = form(v1, match.get("player1") or ""), form(v2, match.get("player2") or "")
+    f1, err1 = _safe_dict(lambda: form(v1, match.get("player1") or ""))
+    f2, err2 = _safe_dict(lambda: form(v2, match.get("player2") or ""))
     for key, col_id in (("record", "c.record"), ("last_date", "c.last_date"),
                         ("last_opp", "c.last_opp"), ("surface", "c.surface"),
                         ("dr", "c.dr"), ("s1_in", "c.s1_in"), ("s1_won", "c.s1_won"),
@@ -730,9 +753,10 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
         values[col_id] = _pair(f1.get(key), f2.get(key))
 
     # ---- D: surface ----
-    surface1 = _surface_for_match(v1, match.get("tournament") or "")
-    surface2 = _surface_for_match(v2, match.get("tournament") or "")
+    surface1, err_s1 = _safe_val(lambda: _surface_for_match(v1, match.get("tournament") or ""))
+    surface2, err_s2 = _safe_val(lambda: _surface_for_match(v2, match.get("tournament") or ""))
     surface = surface1 or surface2
+    err1, err2 = err1 or err_s1, err2 or err_s2
 
     def surface_cells(view: PlayerView, surf: Optional[str]) -> dict:
         if not surf:
@@ -763,8 +787,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
             "tpw": g("TPW", fb=21) or MISSING,
         }
 
-    d1 = surface_cells(v1, surface1)
-    d2 = surface_cells(v2, surface2)
+    d1, err1 = _safe_dict(lambda: surface_cells(v1, surface1))
+    d2, err2 = _safe_dict(lambda: surface_cells(v2, surface2))
     for key, col_id in (("record", "d.record"), ("set_pct", "d.set_pct"),
                         ("game_pct", "d.game_pct"), ("tb_pct", "d.tb_pct"),
                         ("hold_pct", "d.hold_pct"), ("brk_pct", "d.brk_pct"),
@@ -812,7 +836,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
             "dfs": g("DF%", fb=15) or MISSING,
         }
 
-    s1, s2 = season(v1), season(v2)
+    s1, err1 = _safe_dict(lambda: season(v1))
+    s2, err2 = _safe_dict(lambda: season(v2))
     for key, col_id in (("record", "e.record"), ("win_pct", "e.win_pct"),
                         ("dr", "e.dr"), ("hld", "e.hld"), ("brk", "e.brk"),
                         ("best", "e.best"), ("matches", "e.matches"),
@@ -847,7 +872,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
         out["s2_max"] = _mean_col(view, "serve-speed", "Max 2nd", fallback=13, fmt="{:.0f} mph")
         return out
 
-    x1, x2 = extended(v1), extended(v2)
+    x1, err1 = _safe_dict(lambda: extended(v1))
+    x2, err2 = _safe_dict(lambda: extended(v2))
     for key, col_id in (("last52", "f.last52"), ("we_ratio", "f.we_ratio"),
                         ("s1_speed", "f.s1_speed"), ("s2_speed", "f.s2_speed"),
                         ("winners", "f.winners"), ("ufes", "f.ufes"),
@@ -857,7 +883,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
         values[col_id] = _pair(x1.get(key), x2.get(key))
 
     # ---- G: head-to-head (P1's table) ----
-    h2h = _h2h_row(v1, match.get("player2") or "")
+    h2h, err_h2h = _safe_val(lambda: _h2h_row(v1, match.get("player2") or ""))
+    err1 = err1 or err_h2h
     if h2h is None:
         known = v1.available and v2.available
         for col_id in ("g.record", "g.last", "g.meetings", "g.win_pct", "g.tb",
@@ -976,7 +1003,8 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
         out["chall"] = f"{w}-{l}" if seen else None
         return out
 
-    k1, k2 = rankings(v1), rankings(v2)
+    k1, err1 = _safe_dict(lambda: rankings(v1))
+    k2, err2 = _safe_dict(lambda: rankings(v2))
     for key, col_id in (("points", "k.points"), ("h_elo", "k.h_elo"),
                         ("c_elo", "k.c_elo"), ("g_elo", "k.g_elo"),
                         ("prev_rank", "k.prev_rank"), ("chall", "k.chall")):
@@ -992,23 +1020,33 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
                 return f"{w}-{l}"
         return None
 
-    values["l.slams"] = _pair(split_record(v1, "Grand Slams"),
-                              split_record(v2, "Grand Slams"))
-    values["l.masters"] = _pair(split_record(v1, "Masters", "Premiers"),
-                                split_record(v2, "Masters", "Premiers"))
-    values["l.top10"] = _pair(split_record(v1, "vs Top 10"),
-                              split_record(v2, "vs Top 10"))
-    values["l.finals"] = _pair(split_record(v1, "Finals"),
-                               split_record(v2, "Finals"))
-    values["l.b5"] = _pair(split_record(v1, "Best of 5"),
-                           split_record(v2, "Best of 5"))
+    def _safe_split(view: PlayerView, *splits: str) -> tuple[Optional[str], bool]:
+        """Like _safe_val but for the split_record family — returns (value, err)."""
+        try:
+            return split_record(view, *splits), False
+        except Exception:
+            return None, True
+
+    values["l.slams"] = _pair(_safe_split(v1, "Grand Slams")[0],
+                              _safe_split(v2, "Grand Slams")[0])
+    values["l.masters"] = _pair(_safe_split(v1, "Masters", "Premiers")[0],
+                                _safe_split(v2, "Masters", "Premiers")[0])
+    values["l.top10"] = _pair(_safe_split(v1, "vs Top 10")[0],
+                              _safe_split(v2, "vs Top 10")[0])
+    values["l.finals"] = _pair(_safe_split(v1, "Finals")[0],
+                               _safe_split(v2, "Finals")[0])
+    values["l.b5"] = _pair(_safe_split(v1, "Best of 5")[0],
+                           _safe_split(v2, "Best of 5")[0])
 
     status = {}
-    for side, view in (("p1", v1), ("p2", v2)):
+    for side, view, parse_err in (("p1", v1, err1), ("p2", v2, err2)):
         if not view.payload:
             status[side] = "missing"
         elif view.error:
             status[side] = "error"          # fetch fault — retried next pass
+        elif parse_err:
+            status[side] = "parse"          # payload fetched but a table was
+                                            # unreadable — show what we have
         elif view.unresolved:
             status[side] = "unresolved"
         elif not view.available:
@@ -1019,10 +1057,22 @@ def compute_values(match: dict, stats: dict[str, dict], form_n: int = 10) -> dic
             "surface": surface or None}
 
 
-def build_rows(matches: list[dict], stats: dict[str, dict], form_n: int = 10) -> list[dict]:
-    rows = []
+def build_rows(matches: list[dict], stats: dict[str, dict], form_n: int = 10) -> tuple[list[dict], dict[str, str]]:
+    """One row per match, plus a per-match error map.
+
+    A single malformed match (a partial TA payload, a layout change, a table
+    whose rows are not rows) must degrade that match to "—" + an `error`
+    status instead of crashing the whole endpoint — and through it the
+    dashboard. The error map is empty in the happy path, so existing callers
+    that ignore it keep working.
+    """
+    rows, errors = [], {}
     for m in matches:
-        extra = compute_values(m, stats, form_n=form_n)
+        try:
+            extra = compute_values(m, stats, form_n=form_n)
+        except Exception as exc:
+            errors[str(m.get("match_id"))] = f"{type(exc).__name__}: {exc}"
+            extra = {"values": {}, "stats_status": {"p1": "error", "p2": "error"}}
         rows.append({
             "match_id": str(m.get("match_id")),
             "player1": m.get("player1"),
@@ -1032,4 +1082,4 @@ def build_rows(matches: list[dict], stats: dict[str, dict], form_n: int = 10) ->
             "values": extra["values"],
             "stats_status": extra["stats_status"],
         })
-    return rows
+    return rows, errors

@@ -346,7 +346,7 @@ browser (`localStorage`), the LLM format is the initial default.
 |---|---|---|
 | GET | `/api/version` | dashboard version (from the `VERSION` file) |
 | GET | `/api/columns` | checkbox catalogue (groups A–L) |
-| GET | `/api/matches?form_n=10` | rows + computed values + stats status (`form_n` defaults to 10) |
+| GET | `/api/matches?form_n=10` | rows + computed values + stats status + row_errors map (`form_n` defaults to 10) |
 | POST | `/api/scan` | start list scan `{stop_at_night_gap=false, include_live}` |
 | POST | `/api/odds` | start odds pass `{match_ids?, force?}` — `match_ids` scopes it (verbatim; `[]` = nothing) and is what the dashboard sends for its selected lines; default: all missing odds, live skipped, `force=true` re-fetches even stored odds |
 | POST | `/api/stats` | start stats fetch `{names?}` — `names` scopes it (`[]` = nothing) and is what the dashboard sends for the players of its selected lines; inside that scope the same rule applies: default = all players **missing** stats, stored errors retried |

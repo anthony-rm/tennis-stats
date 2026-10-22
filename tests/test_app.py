@@ -274,6 +274,42 @@ def test_fetch_fault_is_error_status_not_unresolved():
     assert out["values"]["b.rank"] == "8 | —"
 
 
+def test_build_rows_isolation_and_error_map(monkeypatch):
+    """A crashing compute_values must not take the whole row set down: the
+    bad match degrades to "—" + `error` status, the rest stays intact, and
+    the error is reported in the map."""
+    monkeypatch.setattr(col, "compute_values",
+                        lambda m, stats, form_n=10: (_ for _ in ()).throw(
+                            RuntimeError("boom")) if m.get("match_id") == "9"
+                        else {"values": {"c.record": "1-0"}, "stats_status": {"p1": "ok", "p2": "ok"}})
+    rows, errors = col.build_rows([MATCH, dict(MATCH, match_id="9",
+                                              player1="A", player2="B")], {})
+    assert errors == {"9": "RuntimeError: boom"}
+    assert rows[0]["values"]["c.record"] == "1-0"
+    assert rows[1]["stats_status"] == {"p1": "error", "p2": "error"}
+    assert rows[1]["values"] == {}
+
+
+def test_compute_values_isolates_a_crashing_player_payload():
+    """A payload that crashes inside compute_values (e.g. a non-dict tables
+    field) degrades that player to `parse` and keeps the rest of the row —
+    the crash is caught by build_rows, which reports it in the error map."""
+    good = {"player_name": "Novak Djokovic", "player_id": "NovakDjokovic",
+            "profile": {"current_rank": 8}, "tables": {}}
+    bad = {"player_name": "Iga Swiatek", "player_id": "IgaSwiatek",
+           "profile": {}, "tables": "ab"}          # dict("ab") raises ValueError
+    rows, errors = col.build_rows(
+        [MATCH], {"Novak Djokovic": good, "Iga Swiatek": bad})
+    assert set(errors) == {MATCH["match_id"]}
+    assert rows[0]["stats_status"] == {"p1": "error", "p2": "error"}
+    assert rows[0]["values"] == {}
+
+
+def test_build_rows_returns_errors_tuple():
+    rows, errors = col.build_rows([MATCH], {})
+    assert isinstance(rows, list) and isinstance(errors, dict)
+
+
 def test_live_and_day_labels():
     m = dict(MATCH, live=1, start_local=None)
     v = col.compute_values(m, {})["values"]
@@ -298,7 +334,8 @@ def test_outcome_detection():
 def _rows(stats=None):
     matches = [MATCH, dict(MATCH, match_id="2", player1="Ann Li",
                            player2="Iga Swiatek")]
-    return col.build_rows(matches, stats if stats is not None else {}, form_n=10)
+    rows, _ = col.build_rows(matches, stats if stats is not None else {}, form_n=10)
+    return rows
 
 
 def test_export_tsv():
@@ -335,7 +372,7 @@ def test_export_markdown_and_blocks():
 
 
 def test_export_llm_format(stats):
-    rows = col.build_rows([dict(MATCH, odds_json=ODDS_JSON)], stats, form_n=10)
+    rows, _ = col.build_rows([dict(MATCH, odds_json=ODDS_JSON)], stats, form_n=10)
     cells = {"75620252": ["a.tournament", "a.games", "b.rank"]}
     text = export_text(rows, cells, "llm")
     lines = text.splitlines()
