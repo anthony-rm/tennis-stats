@@ -16,7 +16,7 @@ APP_LOCAL  := dist/Tennis Stats.app
 APP_INST   := /Applications/Tennis Stats.app
 
 # `make run` does not auto-scan by default (safe next to the installed app);
-# `AUTOSCAN=1 make run` restores the normal dev behaviour.
+# the app never auto-scans on start, so this is just belt-and-braces.
 RUN_ENV = TENNIS_STATS_PORT=$(DEV_PORT)
 ifndef AUTOSCAN
 RUN_ENV += TENNIS_STATS_NO_AUTOSCAN=1

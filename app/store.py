@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS selections (
     format      TEXT DEFAULT 'tsv',
     updated_at  TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -254,6 +258,50 @@ class Store:
         except sqlite3.OperationalError:
             pass
         return {"matches": matches, "stats": stats, "players": players}
+
+    # ------------------------------------------------------ settings ----
+    # Cooldown between scrapes, per source, in seconds. These feed the job
+    # loops (Winamax odds delay_range, Tennis Abstract inter-player delay) so
+    # the user can slow a scrape down to stay under a WAF / polite-website
+    # threshold without editing code.
+    DEFAULT_SETTINGS = {
+        "cooldown_winamax": 1.5,
+        "cooldown_ta": 1.6,
+    }
+
+    def get_settings(self) -> dict:
+        out = dict(self.DEFAULT_SETTINGS)
+        cur = self._conn.execute("SELECT key, value FROM settings")
+        for key, value in cur.fetchall():
+            if key in out:
+                try:
+                    out[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        return out
+
+    def set_settings(self, settings: dict) -> dict:
+        """Persist the settings the caller sent (unknown keys are ignored).
+
+        Returns the full settings map after the write, so the UI can echo the
+        canonical (clamped) values back.
+        """
+        with self._conn:
+            for key in self.DEFAULT_SETTINGS:
+                if key not in settings:
+                    continue
+                try:
+                    value = float(settings[key])
+                except (TypeError, ValueError):
+                    continue
+                if value < 0.1 or value > 120:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, f"{value:.3g}"),
+                )
+        return self.get_settings()
 
     # ------------------------------------------------------ selections ---
     def get_selection(self, name: str = "default") -> Optional[dict]:

@@ -459,6 +459,23 @@ def test_store_stats_and_selection(tmp_path):
     s.close()
 
 
+def test_store_settings_defaults_clamp_and_persist(tmp_path):
+    s = Store(tmp_path / "t.db")
+    # defaults apply before anything is saved
+    assert s.get_settings() == {"cooldown_winamax": 1.5, "cooldown_ta": 1.6}
+    # round-trips the clamped value
+    saved = s.set_settings({"cooldown_winamax": 3.0, "cooldown_ta": 0.25})
+    assert saved == {"cooldown_winamax": 3.0, "cooldown_ta": 0.25}
+    assert s.get_settings() == saved
+    # unknown keys are ignored, out-of-range values are ignored (previous value kept)
+    s.set_settings({"cooldown_winamax": 999, "bogus": 1})
+    assert s.get_settings() == {"cooldown_winamax": 3.0, "cooldown_ta": 0.25}
+    # a fresh connection still reads them (they are persisted, not in-memory)
+    s2 = Store(tmp_path / "t.db")
+    assert s2.get_settings()["cooldown_ta"] == 0.25
+    s.close(); s2.close()
+
+
 def test_store_clear_downloaded_keeps_selection(tmp_path):
     """'Clear data' removes what was fetched, never the user's own choices."""
     s = Store(tmp_path / "t.db")

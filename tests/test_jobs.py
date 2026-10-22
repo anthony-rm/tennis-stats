@@ -33,8 +33,9 @@ class FakeSession:
 
     fetched: list[str] = []
 
-    def __init__(self, on_event=None):
+    def __init__(self, on_event=None, delay_range=(1.0, 2.0)):
         self.on_event = on_event
+        self.delay_range = delay_range
 
     async def start(self) -> None:
         pass
@@ -274,7 +275,9 @@ def test_stats_pass_stops_after_repeated_network_failures(tmp_path, monkeypatch,
     assert "Tennis Abstract unreachable" in job["message"]
     # the pass gives up instead of burning a timeout on every remaining player
     assert len(fetched) == jobs_mod.NETWORK_ABORT_AFTER
-    assert job["result"] == {"stored": jobs_mod.NETWORK_ABORT_AFTER, "unresolved": []}
+    assert job["result"]["stored"] == jobs_mod.NETWORK_ABORT_AFTER
+    assert job["result"]["unresolved"] == []
+    assert "check your Internet connection" in job["result"]["suggestion"]
     rows = store.get_stats()
     assert len(rows) == jobs_mod.NETWORK_ABORT_AFTER
     assert all("error" in r and not r.get("unresolved") for r in rows.values())

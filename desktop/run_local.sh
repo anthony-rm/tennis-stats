@@ -7,8 +7,8 @@
 #                         replaces itself from the GitHub release)
 #   * repo data dir       TENNIS_STATS_DATA_DIR=<repo>/data
 #                         (installed app keeps ~/Library/Application Support)
-#   * no auto-scan        TENNIS_STATS_NO_AUTOSCAN=1 unless AUTOSCAN=1 —
-#                         avoids two concurrent Winamax scrapes
+#   * (no auto-scan       the app never auto-scans on start — refresh is a
+#                         manual action, so this instance is always safe)
 #
 # The bundle binary is executed directly instead of `open` so the environment
 # variables actually reach it. Instance runs detached; log: build/local-run.log

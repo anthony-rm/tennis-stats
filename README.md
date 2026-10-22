@@ -98,28 +98,38 @@ python3 -m venv .venv                # already present in this checkout
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open <http://127.0.0.1:8000>. The Winamax scan starts automatically on server
-start; then press **Fetch odds** and **Fetch stats** (both run as background
-jobs with live progress via SSE):
+Open <http://127.0.0.1:8000>. Nothing scrapes by itself: press **Refresh list**
+first (the scan is always a deliberate click — the server never auto-scans on
+start), then **Fetch odds** and **Fetch stats** (all run as background jobs
+with live progress via SSE):
 
+* **Refresh list** — re-scans the whole Winamax tennis list. When Winamax
+  cannot be reached (geo-block / WAF) the scan reports it and tells you to
+  enable your **France VPN**; a plain connectivity failure says to check your
+  **Internet connection** instead;
 * **Fetch odds** — the selected lines that have no odds yet (live matches
   skipped); **↻ Refresh odds** re-fetches the odds of the selected lines,
   *including the ones already shown*, because the odds move during the day;
 * **Fetch stats** — the players of the selected lines still missing Tennis
   Abstract data (already stored players are skipped, stored fetch errors are
-  retried; three consecutive network failures stop the pass with an error
-  instead of recording every remaining player as absent);
-* **Clear data** — deletes the downloaded data of the selected lines: their
-  rows and odds, the stats of their players *when no other listed match still
-  needs them*, and those players' cached pages on disk. Confirmed first (the
-  dialog lists the matches), disabled while a job runs; the other matches,
-  your selection and copy format are kept, and the cleared lines come back
-  with the next scan.
+  retried; three consecutive network failures stop the pass with an error +
+  "check your Internet connection" instead of recording every remaining
+  player as absent);
+* **Clear all data** — deletes **everything** that was downloaded: every
+  match row, every stored odd, every player stat and the whole cached Tennis
+  Abstract tree. Confirmed first, disabled while a job runs; your selection
+  and copy format are kept, and the grid refills with the next scan.
 
-All four are **line-scoped** — **Fetch odds**, **↻ Refresh odds**, **Fetch
-stats** and **Clear data** act on the selected lines only, so tick a line or a
-day first; with nothing selected they ask for a line instead of quietly doing
-the whole list.
+The three fetch buttons are **line-scoped** — **Refresh list** aside, **Fetch
+odds**, **↻ Refresh odds** and **Fetch stats** act on the selected lines only,
+so tick a line or a day first; with nothing selected they ask for a line
+instead of quietly doing the whole list. **Clear all data** is deliberately
+not scoped — its name is its behaviour.
+
+The **Scrape cooldown** row sets the pause between requests of each scraper
+(Winamax match pages, Tennis Abstract players). Raise it if a site starts
+blocking; the values are saved on the server and applied from the next fetch
+on.
 
 The grid fills in **live**: each stored match / player pushes a `data` event
 on the SSE stream and the table reloads (throttled) while the job is still
@@ -135,8 +145,8 @@ the title shows the dashboard version.
   boxes **only for the selected lines** (untick a line and its boxes leave the
   copy without being lost);
 * **⧉ Copy selection** copies the boxes of the selected lines; **⧉ Copy match
-  list** copies those matches as `A vs B` lines. The three fetch buttons and
-  **Clear data** take the same scope (the selected lines), see above.
+  list** copies those matches as `A vs B` lines. The three fetch buttons take
+  the same line scope; **Clear all data** clears the whole dataset.
 
 Requires Google Chrome installed (Playwright uses `channel="chrome"`, so no
 browser download is needed) and network access to winamax.fr /
@@ -164,7 +174,7 @@ tennisabstract.com.
 
 ```
 app/
-  main.py        FastAPI: API, SSE stream, static page, auto-scan on start
+  main.py        FastAPI: API, SSE stream, static page, settings & update endpoints
   jobs.py        background jobs (scan / odds / stats) + progress events
   store.py       SQLite: matches, stats, selections (data/tennis_stats.db)
   columns.py     column catalogue (groups A–L) + value computation
@@ -344,7 +354,11 @@ browser (`localStorage`), the LLM format is the initial default.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/version` | dashboard version (from the `VERSION` file) |
+| GET | `/api/version` | dashboard version (from the `VERSION` file) — clicking it checks GitHub for a newer release and installs it |
+| GET | `/api/settings` | scrape cooldowns (`cooldown_winamax`, `cooldown_ta`) |
+| POST | `/api/settings` | save them (clamped to 0.1–120 s, persisted in the DB, applied from the next fetch on) |
+| GET | `/api/update/check` | is a newer release available? (GitHub feed) |
+| POST | `/api/update` | download + install it (swaps the bundle, relaunches) |
 | GET | `/api/columns` | checkbox catalogue (groups A–L) |
 | GET | `/api/matches?form_n=10` | rows + computed values + stats status + row_errors map (`form_n` defaults to 10) |
 | POST | `/api/scan` | start list scan `{stop_at_night_gap=false, include_live}` |
@@ -457,7 +471,12 @@ launchctl load ~/Library/LaunchAgents/com.tennis.stats.scan.plist
   self-contained file with its existing update URL.
 * An extra export format (`md_block`, one Markdown block per match) was added
   alongside the planned TSV/Markdown/JSON toggle.
-* The three fetch buttons and **Clear data** are **line-scoped** (PLAN.md §5
-  had them cover the whole list): they act on the selected lines, and the
-  endpoints keep their whole-list meaning only when called without a scope —
-  an explicit empty scope never widens to "everything".
+* The three fetch buttons are **line-scoped** (PLAN.md §5 had them cover the
+  whole list): they act on the selected lines, and the endpoints keep their
+  whole-list meaning only when called without a scope — an explicit empty
+  scope never widens to "everything". **Clear all data** is deliberately not
+  scoped: it wipes every downloaded row, odd, stat and cached page in one
+  click, confirmed first.
+* The Winamax scan no longer starts automatically on server start — it is an
+  explicit, deliberate click (**Refresh list**), so a second instance next to
+  the installed app can never collide on the same scrape.

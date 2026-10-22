@@ -62,12 +62,21 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 @pytest.fixture
-def http_root(tmp_path):
-    """Local HTTP server rooted at ``tmp_path``; yields the base URL."""
+def http_root(tmp_path, monkeypatch):
+    """Local HTTP server rooted at ``tmp_path``; yields the base URL.
+
+    ``no_proxy`` is forced on for the loopback: a machine whose system HTTP
+    proxy is a VPN client (macOS reports it through SystemConfiguration and
+    ``urllib`` picks it up) otherwise swallows every request to the test
+    server — macOS bypasses ``localhost`` but not ``127.0.0.1``, so both are
+    listed and the fixture serves the ``localhost`` URL.
+    """
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     handler = functools.partial(_QuietHandler, directory=str(tmp_path))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
+    yield f"http://localhost:{server.server_address[1]}"
     server.shutdown()
 
 

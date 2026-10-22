@@ -48,7 +48,10 @@
     color: var(--muted); background: var(--bg);
     border: 1px solid var(--border); border-radius: 999px;
     padding: 1px 9px; font-variant-numeric: tabular-nums;
+    cursor: pointer; user-select: none;
   }
+  .ver:hover { color: var(--accent); border-color: var(--accent); }
+  .ver:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .jobs { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
   .chip {
     display: inline-flex; align-items: center; gap: 6px;
@@ -68,7 +71,7 @@
   .toolbar.secondary {
     margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--border);
   }
-  button, select, input[type="search"] {
+  button, select, input[type="search"], input[type="number"] {
     font: inherit; color: var(--fg); background: var(--panel);
     border: 1px solid var(--border); border-radius: 6px;
     box-sizing: border-box; height: 32px; padding: 0 11px; line-height: 20px;
@@ -106,6 +109,10 @@
   }
   .quick.partial { border-color: var(--accent); color: var(--accent); }
   .sep { width: 1px; height: 20px; background: var(--border); flex: none; }
+
+  /* settings row: the cooldown inputs sit in labelled chips, compact */
+  #settings-row input[type="number"] { width: 76px; padding: 0 7px; height: 30px; }
+  #settings-row label.inline span { min-width: 0; }
 
   main { padding: 14px 16px 16px; }
   .empty {
@@ -254,7 +261,8 @@
 <header>
   <div class="title-row">
     <h1>Tennis Betting Dashboard</h1>
-    <span class="ver" id="version" title="Dashboard version">v?</span>
+    <span class="ver" id="version" role="button" tabindex="0"
+          title="Dashboard version — click to check for updates" aria-label="Dashboard version — click to check for updates">v?</span>
     <div class="jobs" id="jobs" aria-live="polite">
       <span class="chip" id="job-scan"><span class="dot"></span><strong>scan</strong> <span>connecting…</span></span>
       <span class="chip" id="job-odds"><span class="dot"></span><strong>odds</strong> <span>idle</span></span>
@@ -267,7 +275,7 @@
     <button id="btn-odds-refresh" title="Re-fetch the odds of the SELECTED matches, even the ones already shown — the odds move during the day, so this always pulls the current values (live matches skipped)">↻ Refresh odds</button>
     <button id="btn-stats" title="Fetch Tennis Abstract stats for the players of the SELECTED matches still missing them (stored data kept, stored fetch errors retried)">Fetch stats</button>
     <button class="danger" id="btn-clear"
-            title="Delete the downloaded data of the SELECTED matches — their rows, odds, the stats of their players (when no other listed match needs them) and their cached player pages. The other matches, your selection and copy format are kept (disabled while a fetch runs)">Clear data</button>
+            title="Delete ALL downloaded data — every match row, every stored odd, every player stat and every cached Tennis Abstract page. Your selection and copy format are kept, but the grid empties until the next scan (disabled while a fetch runs)">Clear all data</button>
     <span class="spacer"></span>
     <input type="search" id="search" placeholder="Search player / tournament…" aria-label="Search matches">
     <label class="inline"><input type="checkbox" id="hide-live"> hide live</label>
@@ -295,6 +303,19 @@
     <button class="primary" id="btn-copy">⧉ Copy selection</button>
     <button id="btn-copy-list" title="Copy the selected matches as 'A vs B' lines">⧉ Copy match list</button>
     <span class="count" id="count">0 matches · 0 cells · 0 cols</span>
+  </div>
+  <div class="toolbar secondary" id="settings-row">
+    <span class="quick-label" style="align-self:center;">Scrape cooldown (s):</span>
+    <label class="inline" title="Seconds the Winamax odds pass waits between match pages — raise it if Winamax starts blocking (403 / WAF)">
+      <span>Winamax</span>
+      <input type="number" id="cooldown-winamax" min="0.1" max="120" step="0.1" aria-label="Winamax scrape cooldown in seconds">
+    </label>
+    <label class="inline" title="Seconds the Tennis Abstract pass waits between players — be polite to the site">
+      <span>Tennis Abstract</span>
+      <input type="number" id="cooldown-ta" min="0.1" max="120" step="0.1" aria-label="Tennis Abstract scrape cooldown in seconds">
+    </label>
+    <button id="btn-settings-save" title="Save the cooldowns (applied from the next fetch on)">Save</button>
+    <span class="count" id="settings-status" style="align-self:center;"></span>
   </div>
 </header>
 
@@ -1054,7 +1075,8 @@ function render() {
       $("empty-text").textContent = scan.message || "Opening the tennis list.";
     } else if (scan.status === "error") {
       $("empty-title").textContent = "Scan failed";
-      $("empty-text").textContent = scan.message || "unknown error";
+      const hint = (scan.result && scan.result.suggestion) || scan.message || "unknown error";
+      $("empty-text").textContent = hint;
     } else {
       $("empty-title").textContent = "No matches yet";
       $("empty-text").textContent = "Press “Refresh list” to scan the tennis matches on Winamax.";
@@ -1111,7 +1133,7 @@ async function loadMatches() {
   initLines();
   maybeApplyDefaultSelection();
   render();
-  if (data.row_errors) {
+  if (data.row_errors && Object.keys(data.row_errors).length) {
     const n = Object.keys(data.row_errors).length;
     toast(`${n} match${n === 1 ? "" : "es"} could not be computed — see the TA? badge`, true);
   }
@@ -1155,6 +1177,15 @@ async function loadVersion() {
     const data = await api("/api/version");
     $("version").textContent = "v" + data.version;
   } catch (e) { $("version").textContent = ""; }
+}
+
+async function loadSettings() {
+  try {
+    const data = await api("/api/settings");
+    const s = data.settings || {};
+    $("cooldown-winamax").value = s.cooldown_winamax;
+    $("cooldown-ta").value = s.cooldown_ta;
+  } catch (e) { /* the row stays empty; the server defaults still apply */ }
 }
 
 /* Live refresh: the backend pushes one "data" event per stored row, so the
@@ -1204,7 +1235,10 @@ function openStream() {
         if (j.kind === "stats" && j.result && j.result.unresolved && j.result.unresolved.length)
           toast("Unresolved players: " + j.result.unresolved.join(", "), true);
       }
-      if (j.status === "error") toast(`${j.kind} failed: ${j.message}`, true);
+      if (j.status === "error") {
+        toast(`${j.kind} failed: ${j.message}`, true);
+        if (j.result && j.result.suggestion) toast(j.result.suggestion, true);
+      }
     }
   };
   es.onerror = () => { /* EventSource auto-reconnects */ };
@@ -1262,27 +1296,23 @@ $("btn-stats").addEventListener("click", () => {
        ` (${rows.length} selected match${rows.length === 1 ? "" : "es"})…`);
 });
 
-/* "Clear data": wipes what was downloaded for the SELECTED matches — their
-   rows, odds, the stats of their players (the ones no other listed match
-   still needs) and their cached pages; the other matches, the selection and
-   the copy format are kept. Confirmed first, with the match list, because the
-   cleared lines only come back with a new scan (or the auto-scan on start). */
+/* "Clear all data": wipes EVERYTHING that was downloaded — every match row,
+   every stored odd, every player stat and the whole Tennis Abstract cache.
+   The selection and copy format are the user's own choices and are kept; the
+   grid empties until the next scan. Confirmed first, because nothing comes
+   back without a scan. */
 $("btn-clear").addEventListener("click", async () => {
-  const rows = selectedMatches();
-  if (!rows.length) { toast(NO_SELECTION, true); return; }
-  const list = rows.slice(0, 5).map((r) => `${r.player1} vs ${r.player2}`).join("\n");
-  const more = rows.length > 5 ? `\n… and ${rows.length - 5} more` : "";
   const ok = confirm(
-    `Delete the downloaded data of the ${rows.length} selected match` +
-    `${rows.length === 1 ? "" : "es"}?\n\n${list}${more}\n\n` +
-    "Their rows, odds, the stats of their players (when no other listed match " +
-    "needs them) and their cached player pages go. The other matches, your " +
-    "selection and copy format are kept — the cleared matches come back with " +
-    "the next scan.");
+    "Delete ALL downloaded data?\n\n" +
+    "Every match row, every stored odd, every player stat and the whole " +
+    "Tennis Abstract cache go. Your column selection and copy format are " +
+    "kept, but the grid empties until the next scan (or " + 
+    "“Refresh list”).\n\nThis cannot be undone."
+  );
   if (!ok) return;
   try {
-    const d = await api("/api/clear", {method: "POST",
-      body: JSON.stringify({match_ids: rows.map((r) => r.match_id)})});
+    // no body = the whole-list clear (every match, every cache file)
+    const d = await api("/api/clear", {method: "POST", body: "{}"});
     const mb = (d.cache_bytes || 0) / 1048576;
     toast(`Cleared ${d.matches} match${d.matches === 1 ? "" : "es"}, ` +
           `${d.stats} player stat${d.stats === 1 ? "" : "s"} and ` +
@@ -1298,6 +1328,66 @@ $("btn-clear").addEventListener("click", async () => {
 
 $("search").addEventListener("input", (e) => { state.search = e.target.value; renderBody(); updateCount(); });
 $("hide-live").addEventListener("change", (e) => { state.hideLive = e.target.checked; renderBody(); updateCount(); });
+
+/* Scrape cooldown settings: persist via the API (the jobs read them from the
+   DB on each pass). The status span echoes the saved, clamped values. */
+$("btn-settings-save").addEventListener("click", async () => {
+  const status = $("settings-status");
+  const body = {
+    cooldown_winamax: $("cooldown-winamax").value,
+    cooldown_ta: $("cooldown-ta").value,
+  };
+  try {
+    const data = await api("/api/settings", {method: "POST", body: JSON.stringify(body)});
+    const s = data.settings || {};
+    $("cooldown-winamax").value = s.cooldown_winamax;
+    $("cooldown-ta").value = s.cooldown_ta;
+    status.textContent = `saved — Winamax ${s.cooldown_winamax}s, TA ${s.cooldown_ta}s`;
+    setTimeout(() => { status.textContent = ""; }, 3500);
+  } catch (e) {
+    toast("Could not save the cooldowns: " + (e.message || String(e)), true);
+  }
+});
+
+/* Update: clicking the version chip checks GitHub; if a newer build exists it
+   asks to install, then POST /api/update downloads + swaps + relaunches. */
+async function checkAndUpdate() {
+  const v = $("version");
+  v.textContent = v.textContent.replace(/^v/, "") + " …";   // "1.1 …" while checking
+  let res;
+  try {
+    res = await api("/api/update/check");
+  } catch (e) {
+    toast("Could not check for updates: " + (e.message || String(e)), true);
+    loadVersion(); return;
+  }
+  loadVersion();
+  if (res.status === "update") {
+    if (!confirm(`Update to ${res.info.version} is available.\n\nDownload and install it now? The app will quit and relaunch.`)) return;
+    try {
+      const out = await api("/api/update", {method: "POST", body: JSON.stringify({})});
+      if (out.status === "installing") {
+        toast(`Installing ${out.version} — the app will relaunch…`);
+      } else if (out.status === "error") {
+        toast("Update failed: " + (out.error || "unknown error"), true);
+      } else {
+        toast("Update status: " + JSON.stringify(out), true);
+      }
+    } catch (e) {
+      toast("Update failed: " + (e.message || String(e)), true);
+    }
+  } else if (res.status === "uptodate") {
+    toast(`✓ You have the latest version (${res.latest || "v" + v.textContent})`);
+  } else if (res.status === "disabled") {
+    toast("Updates are disabled for this build", true);
+  } else {
+    toast("Could not check for updates: " + (res.error || "unknown error"), true);
+  }
+}
+$("version").addEventListener("click", checkAndUpdate);
+$("version").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); checkAndUpdate(); }
+});
 $("format").addEventListener("change", (e) => {
   state.format = e.target.value;
   try { localStorage.setItem("ts.format", state.format); } catch (err) {}
@@ -1357,7 +1447,7 @@ $("btn-copy-list").addEventListener("click", async () => {
 /* ---------------------------- boot -------------------------------------- */
 (async function boot() {
   try {
-    await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches(), loadVersion()]);
+    await Promise.all([loadColumns(), loadSelection(), loadJobs(), loadMatches(), loadVersion(), loadSettings()]);
     pruneSelection();   // the catalogue is complete now: drop removed columns
     state.loadedOnce = true;
     maybeApplyDefaultSelection();

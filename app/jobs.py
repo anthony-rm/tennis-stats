@@ -28,6 +28,19 @@ KINDS = ("scan", "odds", "stats")
 NETWORK_ABORT_AFTER = 3
 
 
+def network_guidance(exc: Exception) -> str:
+    """Human guidance for an unreachable-scrape failure, for the dashboard.
+
+    Winamax is geo-blocked outside France (CloudFront WAF), so a block is its
+    own, actionable hint; any other connectivity fault points at the network.
+    The string is attached to the job's ``result``/``message`` so the UI can
+    show it verbatim in the job chip / empty state.
+    """
+    if isinstance(exc, WinamaxBlocked):
+        return "Winamax could not be reached — enable your France VPN (the site is geo-blocked outside France), then retry."
+    return "Could not reach the website — check your Internet connection and retry."
+
+
 class JobBusy(RuntimeError):
     pass
 
@@ -128,6 +141,17 @@ class JobManager:
                 finally:
                     await session.close()
             n = self.store.upsert_matches(matches)
+            if n == 0:
+                # the list page came up but no match card rendered — usually a
+                # geo/VPN or WAF problem, not a genuinely empty day. Surface the
+                # guidance instead of a bare "0 matches stored".
+                self._update(kind, status="error",
+                             message="no matches found — "
+                                     + network_guidance(WinamaxBlocked("empty scan")),
+                             step=0, total=0, finished_at=_now(),
+                             result={"matches": 0,
+                                     "suggestion": network_guidance(WinamaxBlocked("empty scan"))})
+                return
             self._update(kind, status="done",
                          message=f"{n} matches stored", step=n, total=n,
                          finished_at=_now(), result={"matches": n})
@@ -158,9 +182,11 @@ class JobManager:
             return
 
         fetched, failed = 0, []
+        cooldown = float(self.store.get_settings().get("cooldown_winamax", 1.5))
         try:
             async with self._winamax_lock:
-                session = WinamaxSession(on_event=lambda m: self._update(kind, message=m))
+                session = WinamaxSession(on_event=lambda m: self._update(kind, message=m),
+                                         delay_range=(cooldown, cooldown))
                 try:
                     await session.start()
                     for i, mid in enumerate(targets, 1):
@@ -226,6 +252,7 @@ class JobManager:
 
         loop = asyncio.get_running_loop()
         tally = {"stored": 0, "unresolved": []}
+        cooldown = float(self.store.get_settings().get("cooldown_ta", 1.6))
 
         # each player lands in the store (and on the dashboard) as it arrives
         def progress(done: int, name: str, payload: dict) -> None:
@@ -240,7 +267,7 @@ class JobManager:
             loop.call_soon_threadsafe(apply)
 
         try:
-            await asyncio.to_thread(self._fetch_all, names, progress)
+            await asyncio.to_thread(self._fetch_all, names, progress, cooldown)
             await asyncio.sleep(0)     # let the last queued apply() run first
             unresolved = tally["unresolved"]
             self._update(kind, status="done",
@@ -253,7 +280,7 @@ class JobManager:
             self._fail(kind, exc, partial={"stored": tally["stored"],
                                            "unresolved": tally["unresolved"]})
 
-    def _fetch_all(self, names: list[str], progress) -> None:
+    def _fetch_all(self, names: list[str], progress, cooldown: float = 1.6) -> None:
         session = requests.Session()
         consecutive_net = 0
         for i, name in enumerate(names):
@@ -278,14 +305,22 @@ class JobManager:
                     f"{consecutive_net} consecutive failures ({abort})"
                 ) from abort
             if i < len(names) - 1:
-                time.sleep(1.6)
+                time.sleep(cooldown)
 
     # ------------------------------------------------------------ utils ---
     def _fail(self, kind: str, exc: Exception, partial: Optional[dict] = None) -> None:
         message = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
+        result = partial or {"error": message}
+        # unreachable scrape: attach actionable guidance for the dashboard chip
+        if kind == "scan":
+            result["suggestion"] = network_guidance(exc)
+        elif kind == "stats" and "unreachable" in message:
+            result["suggestion"] = (
+                "Could not reach Tennis Abstract — check your Internet connection and retry."
+            )
         self._update(kind, status="error", message=message, finished_at=_now(),
-                     result=partial or {"error": message})
+                     result=result)
 
     async def shutdown(self) -> None:
         for task in list(self._tasks.values()):

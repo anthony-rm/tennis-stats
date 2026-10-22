@@ -7,6 +7,10 @@ Run:
 Endpoints
     GET  /                     dashboard (web/index.html)
     GET  /api/version          dashboard version (VERSION file)
+    GET  /api/settings         scrape cooldowns (Winamax / Tennis Abstract)
+    POST /api/settings         save them (clamped, persisted in the DB)
+    GET  /api/update/check     is a newer release available? (GitHub feed)
+    POST /api/update           download + install it (swaps the bundle, relaunch)
     GET  /api/columns          checkbox catalogue (groups A-L)
     GET  /api/matches?form_n=N match rows + computed values per column
     GET  /api/jobs             job states (polling fallback)
@@ -28,18 +32,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app import columns as columns_mod
 from app.exporter import FORMATS, export_text
 from app.jobs import JobBusy, JobManager
-from app.paths import app_version, asset_dir, cache_dir, clear_cache, clear_cache_players
+from app.paths import PROJECT_ROOT, app_version, asset_dir, cache_dir, clear_cache, clear_cache_players
 from app.store import Store
 
 WEB_INDEX = asset_dir() / "web" / "index.html"
@@ -51,15 +56,10 @@ jobs = JobManager(store, CACHE_DIR)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # auto-scan on startup (PLAN.md §4/§10: list EVERY match on the page —
-    # the UI selects today's by default via its Day filter).
-    # TENNIS_STATS_NO_AUTOSCAN=1 skips it: useful when a second instance runs
-    # next to the installed app (two concurrent Winamax scrapes = WAF risk).
-    if not os.environ.get("TENNIS_STATS_NO_AUTOSCAN"):
-        try:
-            jobs.start_scan(stop_at_night_gap=False, include_live=True)
-        except JobBusy:
-            pass
+    # No auto-scan on server start: scraping Winamax is an explicit, deliberate
+    # user action (the Refresh list button). An automatic scrape on boot both
+    # fought WAF limits and collided with a second instance running next to the
+    # installed app; the user asked for it off.
     yield
     await jobs.shutdown()
     store.close()
@@ -81,6 +81,74 @@ async def index() -> FileResponse:
 @app.get("/api/version")
 async def get_version() -> dict:
     return {"version": app_version()}
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict:
+    return {"settings": store.get_settings()}
+
+
+@app.post("/api/settings")
+async def post_settings(body: Optional[dict] = Body(default=None)) -> dict:
+    return {"settings": store.set_settings(body or {})}
+
+
+def _desktop_modules():
+    """Import the self-update pair (`updater`, `launcher`).
+
+    The frozen bundle ships them as top-level modules (PyInstaller puts the
+    entry script's own folder — ``desktop/`` — on the path); a checkout has to
+    add it first, exactly like ``tests/test_launcher_update.py`` does. Returns
+    ``(updater, launcher)`` or ``(None, error message)``.
+    """
+    try:
+        import updater  # noqa: F401  (frozen bundle)
+    except ImportError:
+        desktop_dir = str(PROJECT_ROOT / "desktop")
+        if desktop_dir not in sys.path:
+            sys.path.insert(0, desktop_dir)
+        try:
+            import updater  # noqa: F401  (checkout)
+        except ImportError as exc:
+            return None, f"updates unavailable: {exc}"
+    import launcher  # same lookup: sibling of updater.py
+    return updater, launcher
+
+
+@app.get("/api/update/check")
+async def check_update() -> dict:
+    """Ask GitHub what the release feed offers vs. the running version.
+
+    Returns the same shape as ``desktop/updater.check_release``; the check runs
+    in a thread because it reads a network feed. A dev checkout still answers
+    honestly (the install arm refuses with the git hint).
+    """
+    updater, launcher = _desktop_modules()
+    if updater is None:
+        return {"status": "error", "error": launcher}
+    return await run_in_threadpool(updater.check_release, app_version())
+
+
+@app.post("/api/update")
+async def apply_update() -> dict:
+    """Download + install a newer release when one is available.
+
+    In the packaged build this stages the archive while the app is running,
+    spawns the detached swap script and reports ``installing`` — the launcher
+    quits so the script can replace the bundle and relaunch it. In a dev
+    checkout it reports the git workflow instead. The download runs in a
+    worker thread; it never blocks the dashboard's event loop.
+    """
+    updater, launcher = _desktop_modules()
+    if updater is None:
+        return {"status": "error", "error": launcher}
+    result = await run_in_threadpool(updater.check_release, app_version())
+    if result.get("status") != "update":
+        return result
+    error = await run_in_threadpool(launcher.download_and_apply, result["info"])
+    if error:
+        return {"status": "error", "error": error}
+    return {"status": "installing", "version": result["info"]["version"]}
 
 
 @app.get("/api/columns")
