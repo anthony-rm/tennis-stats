@@ -33,12 +33,14 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor as _TPE
 from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import pandas as pd
 import requests
@@ -78,12 +80,27 @@ PROBE_TIMEOUT = 20
 # throttling/blocking is silence, not an answer about the player
 THROTTLED_STATUSES = {403, 429}
 
+# how many consecutive Tennis Abstract/network failures end a batch pass —
+# every remaining player would fail the same way, so the job reports the fault
+# instead of spending a timeout per player (and nothing is recorded as
+# "player absent")
+NETWORK_ABORT_AFTER = 3
+
 # TA's own autocomplete source (~1.7 MB, both tours), reached only when id
 # probing found nothing and memoised in-process for the length of a run
 PLAYERLIST_URL = "https://www.tennisabstract.com/mwplayerlist.js"
 PLAYERLIST_TTL_HOURS = 24.0
 
 CACHE_TTL_HOURS = 24.0
+PLAYERLIST_CACHE_FILE = "playerlist.json"
+PLAYERLIST_CACHE_TTL_SECONDS = PLAYERLIST_TTL_HOURS * 3600
+
+# Parallelism for the batch fetch (see fetch_player_batch). jsfrags tolerates
+# high concurrency (48-way: 46/404s, 0 blocks); player.cgi does not (2-way:
+# 43/429, even 1.5 s spacing), so jsfrags is resolved by a parallel pool and
+# the profile page is fetched through one lock at a 2.5 s spacing.
+JSFRAGS_WORKERS = 10
+PLAYERPAGE_DELAY_S = 2.5
 
 
 class UnresolvedPlayer(Exception):
@@ -180,30 +197,73 @@ def _probe(
 
 
 _PLAYERLIST_CACHE: dict[str, tuple[float, list[str]]] = {}
+_JSFRAGS_MEMO: dict[str, str] = {}
+_JSFRAGS_LOCK = threading.Lock()
+_PLAYER_CGI_LOCK = threading.Lock()
+_LAST_PLAYER_CGI_TIME = 0.0
+
+
+def _get_player_page(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+    min_spacing: float = 1.0,
+) -> str:
+    global _LAST_PLAYER_CGI_TIME
+    with _PLAYER_CGI_LOCK:
+        now = time.monotonic()
+        elapsed = now - _LAST_PLAYER_CGI_TIME
+        if elapsed < min_spacing:
+            time.sleep(min_spacing - elapsed)
+        text = _get(PLAYER_PAGE.format(player_id=player_id), session=session).text
+        _LAST_PLAYER_CGI_TIME = time.monotonic()
+        return text
 
 
 def load_playerlist(
     session: Optional[requests.Session] = None,
     ttl_hours: float = PLAYERLIST_TTL_HOURS,
+    cache_dir: Optional[Path] = None,
 ) -> list[str]:
     """TA's own autocomplete list (`mwplayerlist.js`): every player it knows.
 
     One file covers both tours and is the index behind TA's search box, which
     is why it can resolve an id that differs from the display name. ~1.7 MB,
-    memoised in-process — it is only reached when id probing found nothing, so
-    a run downloads it at most once. Raises `RequestException` (network/HTTP)
-    or `ValueError` (format change) when the list cannot be used.
+    memoised in-process and on disk — it is only reached when id probing found
+    nothing, so a run downloads it at most once.
     """
     now = time.monotonic()
     hit = _PLAYERLIST_CACHE.get(PLAYERLIST_URL)
     if hit and now - hit[0] <= ttl_hours * 3600:
         return hit[1]
+
+    if cache_dir is not None:
+        disk_path = Path(cache_dir) / PLAYERLIST_CACHE_FILE
+        if disk_path.exists():
+            try:
+                mtime = disk_path.stat().st_mtime
+                if time.time() - mtime <= ttl_hours * 3600:
+                    names = json.loads(disk_path.read_text(encoding="utf-8"))
+                    if isinstance(names, list) and names:
+                        _PLAYERLIST_CACHE[PLAYERLIST_URL] = (now, names)
+                        return names
+            except Exception:
+                pass
+
     text = _get(PLAYERLIST_URL, session=session).text
     m = re.match(r"\s*var\s+playerlist\s*=\s*\[(.*)\]\s*;?\s*$", text, re.DOTALL)
     if not m:
         raise ValueError("playerlist variable not found in mwplayerlist.js")
     names = [n for n in json.loads(f"[{m.group(1)}]") if isinstance(n, str)]
     _PLAYERLIST_CACHE[PLAYERLIST_URL] = (now, names)
+
+    if cache_dir is not None:
+        try:
+            disk_path = Path(cache_dir) / PLAYERLIST_CACHE_FILE
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
     return names
 
 
@@ -416,13 +476,15 @@ def parse_table(fragment_html: str, table_id: str) -> Optional[dict]:
 
 
 def parse_all_tables(fragment_html: str) -> dict[str, dict]:
+    """All TA tables -> {id: table}. One BeautifulSoup parse for the id scan,
+    then one parse per table (pandas needs the isolated <table> HTML)."""
     soup = BeautifulSoup(fragment_html, "lxml")
     found = {t.get("id") for t in soup.find_all("table") if t.get("id")}
     tables: dict[str, dict] = {}
     for table_id in TABLE_IDS:
         if table_id not in found:
             continue
-        parsed = parse_table(fragment_html, table_id)
+        parsed = parse_table(str(soup.find("table", id=table_id)), table_id)
         if parsed is not None:
             tables[table_id] = parsed
     return tables
@@ -430,22 +492,27 @@ def parse_all_tables(fragment_html: str) -> dict[str, dict]:
 
 def fetch_player(
     name: str,
+    cache_dir: Optional[Path] = None,
     session: Optional[requests.Session] = None,
+    probe_body: Optional[str] = None,
 ) -> dict:
     """Resolve `name` and fetch profile + every table.
 
-    Raises `UnresolvedPlayer` when TA answered and had no such name, or
-    `ResolutionNetworkError` when TA could not be reached — a retriable fault
-    that must not be recorded as an absent player.
+    `probe_body` is the already-downloaded `jsfrags/<id>.js` body from the
+    resolution step — passing it avoids the redundant 254 KB download that
+    `resolve_player` already performed to prove the id exists.
     """
     player_id, tried = resolve_player(name, session=session)
     if player_id is None:
         raise UnresolvedPlayer(name, tried)
 
-    page_html = _get(PLAYER_PAGE.format(player_id=player_id), session=session).text
+    page_html = _get_player_page(player_id, session=session, min_spacing=PLAYERPAGE_DELAY_S)
     profile = parse_profile(page_html)
 
-    js_text = _get(JS_FRAGS.format(player_id=player_id), session=session).text
+    if probe_body is None:
+        js_text = _get(JS_FRAGS.format(player_id=player_id), session=session).text
+    else:
+        js_text = probe_body
     fragment = extract_player_frag(js_text)
     tables = parse_all_tables(fragment)
 
@@ -459,7 +526,140 @@ def fetch_player(
     }
 
 
+def fetch_player_batch(
+    names: list[str],
+    cache_dir: Optional[Path] = None,
+    ttl_hours: float = CACHE_TTL_HOURS,
+    session: Optional[requests.Session] = None,
+    on_progress: Optional[Callable[[int, str, dict], None]] = None,
+    abort_after: int = NETWORK_ABORT_AFTER,
+) -> tuple[dict[str, dict], int]:
+    """Fetch several players concurrently.
+
+    `jsfrags` tolerates high concurrency (48-way: 46/404s, 0 blocks); `player.cgi`
+    does not (2-way: 43/429), so the two are fetched in separate pools. The
+    profile page is fetched through a single lock with a 1.5 s spacing.
+
+    Returns (results, consecutive_network_failures). A caller can stop the
+    pass when `consecutive_network_failures >= abort_after` — every remaining
+    player would fail the same way, so the job reports the fault instead of
+    spending a timeout per player.
+    """
+    if not names:
+        return {}, 0
+
+    sess = session or requests.Session()
+    cache_dir = Path(cache_dir) if cache_dir is not None else None
+    results: dict[str, dict] = {}
+    consecutive_net = 0
+    abort: Optional[Exception] = None
+    lock = threading.Lock()
+
+    # ---- Phase 1: resolve all names in parallel (jsfrags probes) ----
+    def resolve_one(name: str):
+        nonlocal consecutive_net, abort
+        with lock:
+            if abort is not None:
+                return name, None, [], None
+        tried: list[str] = []
+        try:
+            player_id, tried = resolve_player(name, session=sess)
+        except ResolutionNetworkError as exc:
+            with lock:
+                consecutive_net += 1
+                if consecutive_net >= abort_after:
+                    abort = exc
+            return name, None, tried, exc
+        except UnresolvedPlayer as exc:
+            return name, None, exc.tried, exc
+        except Exception as exc:
+            return name, None, tried, exc
+
+        if player_id is None:
+            return name, None, tried, None
+
+        # Re-download jsfrags here so fetch_player can reuse it — the probe
+        # already proved this id exists, so this is a second 254 KB fetch.
+        # Parallel across all players: jsfrags tolerates high concurrency.
+        try:
+            js_text = _get(JS_FRAGS.format(player_id=player_id), session=sess).text
+        except Exception as exc:
+            with lock:
+                consecutive_net += 1
+                if consecutive_net >= abort_after:
+                    abort = exc
+            return name, None, tried, exc
+        return name, player_id, tried, js_text
+
+    with _TPE(max_workers=JSFRAGS_WORKERS) as ex:
+        for name, player_id, tried, js_text_or_exc in ex.map(resolve_one, names):
+            if player_id is None:
+                exc = js_text_or_exc
+                if isinstance(exc, ResolutionNetworkError):
+                    payload = _error_payload(name, exc)
+                elif isinstance(exc, UnresolvedPlayer):
+                    payload = {
+                        "player_name": name, "player_id": None, "tried": tried,
+                        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                        "unresolved": True, "profile": {}, "tables": {},
+                    }
+                elif exc is None:
+                    # TA answered and had no such name — a permanent absence
+                    payload = {
+                        "player_name": name, "player_id": None, "tried": tried,
+                        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                        "unresolved": True, "profile": {}, "tables": {},
+                    }
+                else:
+                    payload = _error_payload(name, exc)
+                if cache_dir is not None:
+                    save_cached(cache_dir, payload)
+                results[name] = payload
+                if on_progress:
+                    on_progress(len(results), name, payload)
+                continue
+
+            # ---- Phase 2: profile page (throttled) + tables (reused) ----
+            assert isinstance(js_text_or_exc, str), js_text_or_exc
+            try:
+                page_html = _get_player_page(
+                    player_id, session=sess, min_spacing=PLAYERPAGE_DELAY_S)
+                profile = parse_profile(page_html)
+                fragment = extract_player_frag(js_text_or_exc)
+                tables = parse_all_tables(fragment)
+                payload = {
+                    "player_name": name, "player_id": player_id, "tried": tried,
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    "profile": profile, "tables": tables,
+                }
+            except Exception as exc:
+                payload = _error_payload(name, exc)
+            if cache_dir is not None:
+                save_cached(cache_dir, payload)
+            results[name] = payload
+            if on_progress:
+                on_progress(len(results), name, payload)
+
+    return results, consecutive_net
+
+
 # --------------------------------------------------------------- cache -----
+def _error_payload(name: str, exc: Exception) -> dict:
+    """What a failed fetch stores: `error` (retried by the next pass), never
+    `unresolved` — that flag is reserved for names Tennis Abstract answered
+    about and did not have, so a network blip cannot blank a player for good.
+    """
+    payload = {
+        "player_name": name, "player_id": None,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "profile": {}, "tables": {}, "error": str(exc),
+    }
+    tried = getattr(exc, "tried", None)
+    if tried:                               # id variants probed before dying
+        payload["tried"] = list(tried)
+    return payload
+
+
 def _cache_file(cache_dir: Path, player_id: str) -> Path:
     return cache_dir / f"{player_id}.json"
 

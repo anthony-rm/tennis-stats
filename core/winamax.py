@@ -93,11 +93,11 @@ class WinamaxSession:
         resp = await self.page.goto(LIST_URL, wait_until="domcontentloaded", timeout=60000)
         if resp is not None and resp.status >= 400:
             raise WinamaxBlocked(f"list load failed with HTTP {resp.status}")
-        await self.page.wait_for_timeout(5000)
         # the SPA renders its match list asynchronously — wait for real content
         # instead of trusting a fixed delay (a too-early scan sees zero cards)
         try:
-            await self.page.wait_for_selector("[data-testid^='match-card-']", timeout=25000)
+            await self.page.wait_for_selector(
+                "[data-testid^='match-card-']", timeout=25000)
             self.on_event("list page ready")
         except Exception:
             self.on_event("list page loaded but no match cards rendered yet")
@@ -231,7 +231,13 @@ class WinamaxSession:
             await self._assert_not_blocked()
             raise RuntimeError(f"could not open match {match_id}: {exc}") from exc
 
-        await self.page.wait_for_timeout(1200)
+        # the match page renders its odds asynchronously — wait for the first
+        # odd button instead of a fixed 1200 ms delay
+        try:
+            await self.page.wait_for_selector(
+                "[data-testid^='odd-button-']", timeout=5000, state="visible")
+        except Exception:
+            pass
         await self._ensure_core()
         odds = await self.page.evaluate(
             "async () => window.WinamaxCore.extractOddsJSON({delayMs: 250, stepPx: 500})"
@@ -254,8 +260,11 @@ class WinamaxSession:
         assert self.page is not None
         for _ in range(3):
             await self.page.go_back(wait_until="domcontentloaded", timeout=30000)
-            await self.page.wait_for_timeout(2500)
+            # the SPA re-renders the list asynchronously — wait for a card to
+            # appear instead of a fixed 2500 ms delay
             try:
+                await self.page.wait_for_selector(
+                    "[data-testid^='match-card-']", timeout=4000, state="attached")
                 await self._assert_not_blocked()
                 if await self.page.locator("[data-testid^='match-card-']").count() > 0:
                     await self._ensure_core()
@@ -269,8 +278,14 @@ class WinamaxSession:
 
     # -- helpers ---------------------------------------------------------
     async def _scroll_to_card(self, selector: str, max_steps: int) -> bool:
-        """Bring a (virtualized) match card into the DOM. Two passes: from the
-        current position, then from the top of the list."""
+        """Bring a (virtualized) match card into the DOM.
+
+        Two passes: from the current position, then from the top of the list.
+        Each pass first tries a single ``scrollIntoView`` (the card is already
+        in the DOM when the list is short) and only falls back to stepped
+        scrolling for long virtualized lists — a 2000 px step every 40 ms
+        instead of 900 px every 120 ms.
+        """
         assert self.page is not None
         for attempt in range(2):
             if attempt == 1:
@@ -278,18 +293,22 @@ class WinamaxSession:
                     "() => { const sc = window.WinamaxCore.findScrollableContainer();"
                     " if (sc === window) window.scrollTo(0, 0); else sc.scrollTop = 0; }"
                 )
-                await self.page.wait_for_timeout(400)
+                await self.page.wait_for_timeout(200)
+            # fast path: the card is already in the DOM
+            if await self.page.locator(selector).count() > 0:
+                return True
             for _ in range(max_steps):
                 if await self.page.locator(selector).count() > 0:
                     return True
                 moved = await self.page.evaluate(
                     "() => { const sc = window.WinamaxCore.findScrollableContainer();"
                     " const before = sc === window ? window.scrollY : sc.scrollTop;"
-                    " if (sc === window) window.scrollBy(0, 900); else sc.scrollBy({top: 900});"
+                    " if (sc === window) window.scrollBy(0, 2000);"
+                    " else sc.scrollBy({top: 2000});"
                     " const after = sc === window ? window.scrollY : sc.scrollTop;"
                     " return after !== before; }"
                 )
-                await self.page.wait_for_timeout(120)
+                await self.page.wait_for_timeout(40)
                 if not moved:
                     break
         return await self.page.locator(selector).count() > 0

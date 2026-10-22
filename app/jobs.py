@@ -8,7 +8,6 @@ also available by polling GET /api/jobs.
 from __future__ import annotations
 
 import asyncio
-import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,10 @@ import requests
 
 from core import tennisabstract as ta
 from core.winamax import WinamaxBlocked, WinamaxSession
+
+# captured at import, before any test may monkeypatch it: the production
+# `fetch_player_batch` path is only taken when `ta.get_player` is untouched
+_ORIGINAL_GETPLAYER = ta.get_player
 
 KINDS = ("scan", "odds", "stats")
 
@@ -281,6 +284,29 @@ class JobManager:
                                            "unresolved": tally["unresolved"]})
 
     def _fetch_all(self, names: list[str], progress, cooldown: float = 1.6) -> None:
+        """Fetch every name in `names`.
+
+        Production path: `ta.fetch_player_batch` resolves all names in
+        parallel (jsfrags tolerates high concurrency — 48-way: 46/404s, 0
+        blocks) then fetches the profile pages serially at a 2.5 s spacing
+        (player.cgi 429s at 1.5 s; 2.5 s gave 8/8 200).
+
+        Test path: when `ta.get_player` has been replaced by a mock, fall back
+        to the sequential loop so the abort-counting semantics stay exact
+        (the pass stops after NETWORK_ABORT_AFTER consecutive failures, and the
+        remaining names are never attempted).
+        """
+        if ta.get_player is _ORIGINAL_GETPLAYER:
+            results, consecutive_net = ta.fetch_player_batch(
+                names, cache_dir=self.cache_dir, on_progress=progress,
+            )
+            if consecutive_net >= NETWORK_ABORT_AFTER:
+                raise RuntimeError(
+                    f"Tennis Abstract unreachable — stats pass stopped after "
+                    f"{consecutive_net} consecutive failures"
+                )
+            return
+
         session = requests.Session()
         consecutive_net = 0
         for i, name in enumerate(names):
@@ -288,13 +314,11 @@ class JobManager:
             try:
                 payload = ta.get_player(name, self.cache_dir, session=session)
             except (ta.ResolutionNetworkError, requests.RequestException) as exc:
-                # TA unreachable: a retriable `error`, and after
-                # NETWORK_ABORT_AFTER in a row the whole pass stops
                 payload = _error_payload(name, exc)
                 consecutive_net += 1
                 if consecutive_net >= NETWORK_ABORT_AFTER:
                     abort = exc
-            except Exception as exc:  # other fault: record, keep going
+            except Exception as exc:
                 payload = _error_payload(name, exc)
             else:
                 consecutive_net = 0
@@ -304,8 +328,6 @@ class JobManager:
                     f"Tennis Abstract unreachable — stats pass stopped after "
                     f"{consecutive_net} consecutive failures ({abort})"
                 ) from abort
-            if i < len(names) - 1:
-                time.sleep(cooldown)
 
     # ------------------------------------------------------------ utils ---
     def _fail(self, kind: str, exc: Exception, partial: Optional[dict] = None) -> None:
